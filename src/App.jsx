@@ -397,26 +397,45 @@ function overlapRatio(a, b) {
   return inter / Math.max(setA.size, setB.size);
 }
 
+// Generic sheet name patterns — fall back to filename when matched
+const GENERIC_SHEET_NAMES = /^(sheet\d*|data|findings|results|output|list|export|tab\d*)$/i;
+
+function cleanFilename(filename) {
+  return filename
+    .replace(/\.(xlsx|xls|csv)$/i, "")       // strip extension
+    .replace(/[_\-]+/g, " ")                  // underscores/dashes → spaces
+    .replace(/\b(A\d{2,3}|v\d+|\(\d+\)|\d{4,})\b/gi, "") // strip draft versions, numbers
+    .replace(/\s{2,}/g, " ")                  // collapse spaces
+    .trim();
+}
+
 async function parseImportedXlsx(file) {
   // Returns [{signalName, sentences:[]}]
   const ab = await file.arrayBuffer();
   const wb = XLSX.read(ab, { type: "array" });
+  const fileBaseName = cleanFilename(file.name);
   const sheets = [];
+
   for (const sheetName of wb.SheetNames) {
     const ws = wb.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-    // Column A = index 0; skip header row if it looks like metadata (short, no period)
     const sentences = [];
     for (const row of rows) {
       const cell = String(row[0] || "").trim();
       if (!cell) continue;
-      if (cell.length < 15) continue; // skip short labels/headers
-      if (!/[a-z]/i.test(cell)) continue; // skip all-symbol rows
+      if (cell.length < 15) continue;
+      if (!/[a-z]/i.test(cell)) continue;
       sentences.push(cell);
     }
-    if (sentences.length > 0) {
-      sheets.push({ signalName: sheetName.trim(), sentences });
-    }
+    if (sentences.length === 0) continue;
+
+    // Use sheet name unless it's generic — then use filename
+    const isGeneric = GENERIC_SHEET_NAMES.test(sheetName.trim());
+    const signalName = isGeneric
+      ? (wb.SheetNames.length > 1 ? `${fileBaseName} — ${sheetName}` : fileBaseName)
+      : sheetName.trim();
+
+    sheets.push({ signalName, sentences });
   }
   return sheets;
 }
@@ -855,12 +874,16 @@ export default function App() {
   const [showPanel,      setShowPanel]      = useState(false);
   const [showAddModal,   setShowAddModal]   = useState(false);
   const fileInputRef = useRef();
+  const sentenceIndexRef = useRef(null);
 
   useEffect(() => {
     const saved = loadSessions();
     if (saved.length) { setSessions(saved); setActiveSession(saved[saved.length-1]); }
     setCustomSignals(loadCustomSignals());
   }, []);
+
+  // Keep ref in sync so import callback always sees latest index
+  useEffect(() => { sentenceIndexRef.current = sentenceIndex; }, [sentenceIndex]);
 
   const allSignals = [...BUILTIN_SIGNALS, ...customSignals];
 
@@ -948,8 +971,17 @@ export default function App() {
       const existingFindings = activeSession?.findings || [];
       const newSignals = [];
 
-      // Build norm→lineNum lookup from sentence index
-      const indexNormMap = (sentenceIndex || []).map(s => ({
+      // Use ref so we always have the latest sentence index regardless of closure timing
+      const currentIndex = sentenceIndexRef.current || [];
+      const hasIndex = currentIndex.length > 0;
+
+      if (!hasIndex) {
+        const proceed = window.confirm("No draft is loaded — imported findings won't have line numbers or chapter locations.\n\nUpload a draft first for best results. Proceed anyway?");
+        if (!proceed) return;
+      }
+
+      // Build norm lookup from sentence index
+      const indexNormMap = currentIndex.map(s => ({
         norm: normSentence(s.text), lineNum: s.lineNum,
         chapter: s.chapter, sentenceId: s.sentenceId, hash: s.hash,
       }));
@@ -958,23 +990,28 @@ export default function App() {
         const deduped = deduplicateImported(sentences, existingFindings);
         const id = "imported_" + Date.now() + "_" + Math.random().toString(36).slice(2,6);
         const findings = deduped.map(({ sentence, isDupe }) => {
-          // Fuzzy-match to sentence index for lineNum + chapter
+          // Fuzzy-match to sentence index — use 0.6 threshold to handle revised sentences
           const norm = normSentence(sentence);
-          let lineNum = null, matchedChapter = "IMPORTED", matchedId = null, matchedHash = null, bestScore = 0;
+          let lineNum = null, matchedChapter = null, matchedId = null, matchedHash = null, bestScore = 0;
           for (const entry of indexNormMap) {
             const score = overlapRatio(norm, entry.norm);
-            if (score > bestScore && score >= 0.8) {
+            if (score > bestScore && score >= 0.6) {
               bestScore = score; lineNum = entry.lineNum;
               matchedChapter = entry.chapter; matchedId = entry.sentenceId; matchedHash = entry.hash;
             }
           }
           return {
             signal_id: id, signalType: "reader_note",
-            chapter: matchedChapter, sentenceId: matchedId, hash: matchedHash, lineNum,
+            chapter: matchedChapter || "UNMATCHED",
+            sentenceId: matchedId, hash: matchedHash, lineNum,
             sentence, issue: signalName.toUpperCase(),
             disposition: isDupe ? "excluded" : "review_only",
-            confidence: 80,
-            reason: isDupe ? "Duplicate — already caught by existing signal" : `Imported from ${file.name}`,
+            confidence: Math.round(bestScore * 100) || 80,
+            reason: isDupe
+              ? "Duplicate — already caught by existing signal"
+              : lineNum
+                ? `Imported · matched L${lineNum} (${Math.round(bestScore*100)}%)`
+                : `Imported from ${file.name} — no manuscript match`,
           };
         });
 
