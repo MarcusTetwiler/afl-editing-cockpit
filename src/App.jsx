@@ -170,7 +170,8 @@ function runBuiltinSignals(sentences, customSignals = []) {
       const mean = lens.reduce((a,b)=>a+b,0)/lens.length;
       const stdDev = Math.sqrt(lens.reduce((a,b)=>a+Math.pow(b-mean,2),0)/lens.length);
       if (stdDev < 3.5 && mean > 8) {
-        findings.push({ signal_id:"flat_wave", signalType:"defect", chapter, sentenceId:null, hash:null, sentence:`[Para] ${sents.map(s=>s.text).join(" ").slice(0,130)}…`,
+        const firstLineNum = sents[0]?.lineNum || null;
+        findings.push({ signal_id:"flat_wave", signalType:"defect", chapter, sentenceId:null, hash:null, lineNum:firstLineNum, sentence:`[Para] ${sents.map(s=>s.text).join(" ").slice(0,130)}…`,
           issue:"FLAT SENTENCE WAVE", disposition:D.REVIEW, confidence:70,
           reason:`StdDev ${stdDev.toFixed(1)}, mean ${mean.toFixed(1)} words across ${narr.length} sentences` });
       }
@@ -184,7 +185,8 @@ function runBuiltinSignals(sentences, customSignals = []) {
         if (openers[i] && openers[i].length > 1 && openers[i] === openers[i-1]) {
           streak++;
           if (streak >= 3) {
-            findings.push({ signal_id:"repeated_openers", signalType:"defect", chapter, sentenceId:null, hash:null,
+            const firstLineNum = sents[Math.max(0,i-2)]?.lineNum || null;
+            findings.push({ signal_id:"repeated_openers", signalType:"defect", chapter, sentenceId:null, hash:null, lineNum:firstLineNum,
               sentence: sents.slice(i-2,i+1).map(s=>s.text).join("  "),
               issue:"REPEATED OPENERS", disposition:D.ACTIONABLE, confidence:90,
               reason:`"${openers[i]}" opens ${streak} consecutive sentences` });
@@ -365,7 +367,7 @@ const BUILTIN_SIGNALS = [
 // PERSISTENCE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const STORAGE_KEY    = "afl_cockpit_v3";
+const STORAGE_KEY    = "afl_cockpit_v4";
 const CUSTOM_SIG_KEY = "afl_cockpit_custom_signals";
 
 function loadSessions() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]"); } catch { return []; } }
