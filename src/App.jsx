@@ -331,6 +331,61 @@ function saveSessions(s) { try { localStorage.setItem(STORAGE_KEY, JSON.stringif
 function loadCustomSignals() { try { return JSON.parse(localStorage.getItem(CUSTOM_SIG_KEY)||"[]"); } catch { return []; } }
 function saveCustomSignals(s) { try { localStorage.setItem(CUSTOM_SIG_KEY, JSON.stringify(s)); } catch {} }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// IMPORT FINDINGS LIST (xlsx → imported signal)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Normalise a sentence for dedup comparison
+function normSentence(s) {
+  return (s || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
+}
+
+// Returns overlap ratio between two normalised strings
+function overlapRatio(a, b) {
+  if (!a || !b) return 0;
+  const shorter = a.length < b.length ? a : b;
+  const longer  = a.length < b.length ? b : a;
+  if (longer.includes(shorter)) return 1;
+  // Word-level Jaccard
+  const setA = new Set(a.split(" "));
+  const setB = new Set(b.split(" "));
+  const inter = [...setA].filter(w => setB.has(w)).length;
+  return inter / Math.max(setA.size, setB.size);
+}
+
+async function parseImportedXlsx(file) {
+  // Returns [{signalName, sentences:[]}]
+  const ab = await file.arrayBuffer();
+  const wb = XLSX.read(ab, { type: "array" });
+  const sheets = [];
+  for (const sheetName of wb.SheetNames) {
+    const ws = wb.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+    // Column A = index 0; skip header row if it looks like metadata (short, no period)
+    const sentences = [];
+    for (const row of rows) {
+      const cell = String(row[0] || "").trim();
+      if (!cell) continue;
+      if (cell.length < 15) continue; // skip short labels/headers
+      if (!/[a-z]/i.test(cell)) continue; // skip all-symbol rows
+      sentences.push(cell);
+    }
+    if (sentences.length > 0) {
+      sheets.push({ signalName: sheetName.trim(), sentences });
+    }
+  }
+  return sheets;
+}
+
+function deduplicateImported(importedSentences, existingFindings) {
+  const existingNorms = existingFindings.map(f => normSentence(f.sentence));
+  return importedSentences.map(s => {
+    const norm = normSentence(s);
+    const isDupe = existingNorms.some(en => overlapRatio(norm, en) >= 0.85);
+    return { sentence: s, isDupe };
+  });
+}
+
 function computeHealth(findings, wordCount) {
   if (!wordCount) return 0;
   const actionable = findings.filter(f => f.disposition === D.ACTIONABLE).length;
@@ -541,7 +596,8 @@ function AddSignalModal({ sentenceIndex, onSave, onClose }) {
 // SIGNAL MANAGEMENT PANEL (hamburger)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function SignalPanel({ builtinSignals, customSignals, onToggleCustom, onDeleteCustom, onAddSignal, onClose }) {
+function SignalPanel({ builtinSignals, customSignals, onToggleCustom, onDeleteCustom, onAddSignal, onImport, onClose }) {
+  const importRef = useRef();
   return (
     <div style={{ position:"fixed", inset:0, background:C.overlay, zIndex:999, display:"flex", justifyContent:"flex-end" }}
       onClick={e => e.target === e.currentTarget && onClose()}>
@@ -574,7 +630,10 @@ function SignalPanel({ builtinSignals, customSignals, onToggleCustom, onDeleteCu
           {customSignals.map(sig=>(
             <div key={sig.id} style={{ padding:"10px 0", borderBottom:`1px solid ${C.smokeLight}` }}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                <div style={{ fontSize:"12px", color: sig.enabled ? C.parchment : C.textMuted, letterSpacing:"0.08em" }}>{sig.name}</div>
+                <div style={{ display:"flex", alignItems:"center", gap:"8px" }}>
+                  <div style={{ fontSize:"12px", color: sig.enabled ? C.parchment : C.textMuted, letterSpacing:"0.08em" }}>{sig.name}</div>
+                  {sig.imported && <div style={{ fontSize:"8px", background:C.smokeLight, color:C.textMuted, padding:"1px 5px", letterSpacing:"0.1em" }}>IMPORTED</div>}
+                </div>
                 <div style={{ display:"flex", gap:"10px", alignItems:"center", flexShrink:0, marginLeft:"10px" }}>
                   <button onClick={()=>onToggleCustom(sig.id)} style={{ background:"none", border:"none", color: sig.enabled ? C.pass : C.textMuted, fontSize:"9px", letterSpacing:"0.1em", cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif" }}>
                     {sig.enabled ? "ON" : "OFF"}
@@ -583,13 +642,27 @@ function SignalPanel({ builtinSignals, customSignals, onToggleCustom, onDeleteCu
                 </div>
               </div>
               <div style={{ fontSize:"10px", color:C.textMuted, marginTop:"3px", fontFamily:"IM Fell English, serif", fontStyle:"italic" }}>
-                {sig.keywords?.slice(0,4).join(", ")} · {sig.scope}
+                {sig.imported ? sig.description : `${sig.keywords?.slice(0,4).join(", ")} · ${sig.scope}`}
               </div>
             </div>
           ))}
 
           <button onClick={onAddSignal} style={{ marginTop:"16px", background:"transparent", border:`1px solid ${C.amber}`, color:C.amber, padding:"10px 20px", fontSize:"11px", letterSpacing:"0.15em", cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif", width:"100%" }}>
             + ADD SIGNAL
+          </button>
+
+          {/* Divider */}
+          <div style={{ borderTop:`1px solid ${C.smokeLight}`, margin:"20px 0" }} />
+
+          {/* Import section */}
+          <div style={{ fontSize:"9px", letterSpacing:"0.18em", color:C.textMuted, marginBottom:"8px" }}>IMPORT FINDINGS LIST</div>
+          <div style={{ fontSize:"11px", color:C.textDim, fontFamily:"IM Fell English, serif", fontStyle:"italic", marginBottom:"12px", lineHeight:1.4 }}>
+            Upload an xlsx where the sheet name is the signal name and column A contains flagged sentences.
+          </div>
+          <input ref={importRef} type="file" accept=".xlsx" style={{ display:"none" }}
+            onChange={e => { if (e.target.files[0]) { onImport(e.target.files[0]); e.target.value=""; } }} />
+          <button onClick={()=>importRef.current?.click()} style={{ background:"transparent", border:`1px solid ${C.smokeLight}`, color:C.textDim, padding:"10px 20px", fontSize:"11px", letterSpacing:"0.15em", cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif", width:"100%" }}>
+            ↑ IMPORT .XLSX LIST
           </button>
         </div>
       </div>
@@ -612,7 +685,7 @@ function SignalCard({ signal, actionable, raw, prevActionable, onClick }) {
       onMouseEnter={e=>e.currentTarget.style.borderColor=C.amber}
       onMouseLeave={e=>e.currentTarget.style.borderColor=isRegress?C.regress:isPass?C.pass:C.smokeLight}>
       {isRegress && <div style={{ position:"absolute", top:0, left:0, right:0, height:"2px", background:C.regress }} />}
-      {signal.builtin === false && <div style={{ position:"absolute", top:"8px", right:"10px", fontSize:"8px", color:C.textMuted, letterSpacing:"0.1em" }}>CUSTOM</div>}
+      {signal.builtin === false && <div style={{ position:"absolute", top:"8px", right:"10px", fontSize:"8px", color:C.textMuted, letterSpacing:"0.1em" }}>{signal.imported ? "IMPORTED" : "CUSTOM"}</div>}
       <div style={{ fontSize:"10px", letterSpacing:"0.15em", color:C.textMuted, fontFamily:"Barlow Condensed, sans-serif", marginBottom:"8px" }}>{signal.short}</div>
       <div style={{ display:"flex", alignItems:"flex-end", gap:"10px" }}>
         <div style={{ fontSize:"36px", fontFamily:"Barlow Condensed, sans-serif", fontWeight:700, lineHeight:1, color:isPass?C.pass:isRegress?C.regress:C.parchment }}>
@@ -732,6 +805,79 @@ export default function App() {
     const updated = customSignals.filter(s=>s.id!==id);
     setCustomSignals(updated); saveCustomSignals(updated);
   }, [customSignals]);
+
+  const handleImport = useCallback(async (file) => {
+    try {
+      const sheets = await parseImportedXlsx(file);
+      if (!sheets.length) { alert("No valid sheets found. Check format: sheet name = signal name, column A = sentences."); return; }
+
+      const existingFindings = activeSession?.findings || [];
+      const newSignals = [];
+
+      for (const { signalName, sentences } of sheets) {
+        const deduped = deduplicateImported(sentences, existingFindings);
+        const id = "imported_" + Date.now() + "_" + Math.random().toString(36).slice(2,6);
+        const findings = deduped.map(({ sentence, isDupe }) => ({
+          signal_id: id,
+          chapter: "IMPORTED",
+          sentence,
+          issue: signalName.toUpperCase(),
+          disposition: isDupe ? "excluded" : "review_only",
+          confidence: 80,
+          reason: isDupe ? "Duplicate — already caught by existing signal" : `Imported from ${file.name}`,
+        }));
+
+        const actionableCount = findings.filter(f => f.disposition !== "excluded").length;
+        const dupCount = findings.length - actionableCount;
+
+        newSignals.push({
+          id,
+          name: signalName,
+          short: signalName.toUpperCase().slice(0, 10),
+          description: `Imported from ${file.name} — ${actionableCount} unique, ${dupCount} dupes excluded`,
+          keywords: [],
+          scope: "all",
+          enabled: true,
+          builtin: false,
+          imported: true,
+          importedFindings: findings,
+        });
+      }
+
+      // Merge into customSignals
+      const updated = [...customSignals, ...newSignals];
+      setCustomSignals(updated);
+      saveCustomSignals(updated);
+
+      // Merge imported findings into active session
+      if (activeSession) {
+        const allNewFindings = newSignals.flatMap(s => s.importedFindings);
+        const updatedSession = {
+          ...activeSession,
+          findings: [...existingFindings, ...allNewFindings],
+          counts: { ...activeSession.counts },
+          rawCounts: { ...activeSession.rawCounts },
+        };
+        for (const sig of newSignals) {
+          updatedSession.counts[sig.id] = sig.importedFindings.filter(f => f.disposition !== "excluded").length;
+          updatedSession.rawCounts[sig.id] = sig.importedFindings.length;
+        }
+        setActiveSession(updatedSession);
+        setSessions(prev => {
+          const next = prev.map(s => s.id === updatedSession.id ? updatedSession : s);
+          saveSessions(next);
+          return next;
+        });
+      }
+
+      setShowPanel(false);
+      const totalImported = newSignals.reduce((a, s) => a + s.importedFindings.length, 0);
+      const totalDupes    = newSignals.reduce((a, s) => a + s.importedFindings.filter(f=>f.disposition==="excluded").length, 0);
+      alert(`Imported ${newSignals.length} signal${newSignals.length>1?"s":""}.\n${totalImported} sentences — ${totalDupes} duplicates excluded.`);
+    } catch (err) {
+      alert("Import error: " + err.message);
+    }
+  }, [activeSession, customSignals]);
 
   const activeIdx      = sessions.findIndex(s=>s.id===activeSession?.id);
   const prevSess       = activeIdx > 0 ? sessions[activeIdx-1] : null;
@@ -914,6 +1060,7 @@ export default function App() {
         <SignalPanel builtinSignals={BUILTIN_SIGNALS} customSignals={customSignals}
           onToggleCustom={handleToggleCustom} onDeleteCustom={handleDeleteCustom}
           onAddSignal={()=>{setShowAddModal(true); setShowPanel(false);}}
+          onImport={handleImport}
           onClose={()=>setShowPanel(false)} />
       )}
 
