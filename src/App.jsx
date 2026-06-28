@@ -197,17 +197,17 @@ function runBuiltinSignals(sentences, customSignals = []) {
 
   // Sentence-level signals
   for (const s of sentences) {
-    const { text, cls, chapter, wordCount, sentenceId, hash } = s;
+    const { text, cls, chapter, wordCount, sentenceId, hash, lineNum } = s;
     if (["HEADER","FRONT_MATTER","DISPLAY_TEXT","EMPTY"].includes(cls)) continue;
 
     // 7-Word
     if (cls === "NARRATION" && wordCount > 0 && wordCount < 7) {
-      findings.push({ signal_id:"seven_word", signalType:"defect", chapter, sentenceId, hash, sentence:text, issue:"7-WORD NARRATION RULE",
+      findings.push({ signal_id:"seven_word", signalType:"defect", chapter, sentenceId, hash, lineNum, sentence:text, issue:"7-WORD NARRATION RULE",
         disposition:D.ACTIONABLE, confidence:85, reason:`${wordCount}-word narration sentence` });
     } else if (cls === "DIALOGUE_ACTION") {
       const p = parseDialogueSentence(text);
       if (p && p.action_word_count > 0 && p.action_word_count < 7) {
-        findings.push({ signal_id:"seven_word", signalType:"defect", chapter, sentenceId, hash, sentence:text, issue:"7-WORD NARRATION RULE",
+        findings.push({ signal_id:"seven_word", signalType:"defect", chapter, sentenceId, hash, lineNum, sentence:text, issue:"7-WORD NARRATION RULE",
           disposition:D.REVIEW, confidence:60, reason:`Action beat is ${p.action_word_count} words: "${p.action_beat}"` });
       }
     }
@@ -215,7 +215,7 @@ function runBuiltinSignals(sentences, customSignals = []) {
     // Interiority
     if (cls === "NARRATION") {
       const r = detectInteriority(text);
-      if (r.found) findings.push({ signal_id:"interiority", signalType:"defect", chapter, sentenceId, hash, sentence:text, issue:"INTERIORITY LEAK",
+      if (r.found) findings.push({ signal_id:"interiority", signalType:"defect", chapter, sentenceId, hash, lineNum, sentence:text, issue:"INTERIORITY LEAK",
         disposition: r.confidence >= 85 ? D.ACTIONABLE : D.REVIEW, confidence:r.confidence,
         reason:"Cognition verb in narration" });
     }
@@ -223,20 +223,20 @@ function runBuiltinSignals(sentences, customSignals = []) {
     // Pronoun Ambiguity
     if (cls === "NARRATION") {
       const pats = [/\b(it|this|that)\s+(was|is|had|has|did|does|would|could|should|seemed|looked|felt|appeared)\b/gi, /^(It|This|That)\s+(was|is|had|seemed|would|felt|appeared)/];
-      for (const pat of pats) { pat.lastIndex=0; if (pat.test(text)) { findings.push({ signal_id:"pronoun_ambiguity", signalType:"defect", chapter, sentenceId, hash, sentence:text, issue:"PRONOUN AMBIGUITY", disposition:D.REVIEW, confidence:70, reason:"Vague pronoun with unclear referent" }); break; } }
+      for (const pat of pats) { pat.lastIndex=0; if (pat.test(text)) { findings.push({ signal_id:"pronoun_ambiguity", signalType:"defect", chapter, sentenceId, hash, lineNum, sentence:text, issue:"PRONOUN AMBIGUITY", disposition:D.REVIEW, confidence:70, reason:"Vague pronoun with unclear referent" }); break; } }
     }
 
     // Filter Verb
     if (cls === "NARRATION" || cls === "DIALOGUE_ACTION") {
       const target = cls === "DIALOGUE_ACTION" ? (parseDialogueSentence(text)?.action_beat || text) : text;
       if (/\b(saw|looked|watched|noticed|realized|felt|heard|smelled|tasted|sensed|observed|spotted|glimpsed|perceived|detected)\b/gi.test(target))
-        findings.push({ signal_id:"filter_verb", signalType:"defect", chapter, sentenceId, hash, sentence:text, issue:"FILTER VERB", disposition:D.REVIEW, confidence:75, reason:"Perception verb in narration" });
+        findings.push({ signal_id:"filter_verb", signalType:"defect", chapter, sentenceId, hash, lineNum, sentence:text, issue:"FILTER VERB", disposition:D.REVIEW, confidence:75, reason:"Perception verb in narration" });
     }
 
     // GPS-Lite
     if (cls === "NARRATION" && wordCount >= 8) {
       const g = detectGPS(text, wordCount);
-      if (g && g.confidence >= 60) findings.push({ signal_id:"gps_lite", signalType:"defect", chapter, sentenceId, hash, sentence:text,
+      if (g && g.confidence >= 60) findings.push({ signal_id:"gps_lite", signalType:"defect", chapter, sentenceId, hash, lineNum, sentence:text,
         issue:`GPS: ${g.type.replace(/_/g," ")}`, disposition: g.confidence >= 75 ? D.ACTIONABLE : D.REVIEW,
         confidence:g.confidence, reason:g.reason });
     }
@@ -256,7 +256,7 @@ function runBuiltinSignals(sentences, customSignals = []) {
           if (pat.test(target)) { matched = true; break; }
         } catch {}
       }
-      if (matched) findings.push({ signal_id: cs.id, signalType: cs.signalType || "defect", chapter, sentenceId, hash, sentence: text, issue: cs.name.toUpperCase(),
+      if (matched) findings.push({ signal_id: cs.id, signalType: cs.signalType || "defect", chapter, sentenceId, hash, lineNum, sentence: text, issue: cs.name.toUpperCase(),
         disposition: D.REVIEW, confidence: 75, reason: `Custom signal: ${cs.keywords.slice(0,3).join(", ")}` });
     }
   }
@@ -282,6 +282,7 @@ function buildSentenceIndex(rawText) {
   let currentChapter = "Opening";
   let paraIdx = 0;
   let inFrontMatter = true;
+  let globalLineNum = 0;
   const sentences = [];
 
   const parasRaw = [];
@@ -313,19 +314,15 @@ function buildSentenceIndex(rawText) {
       const s = rs.trim();
       if (!s || s.length < 4) continue;
       sentIdx++;
+      globalLineNum++;
       const cls = classifySentence(s);
       const pStr = String(paraIdx).padStart(4, "0");
       const sStr = String(sentIdx).padStart(3, "0");
       const sentenceId = `${chapterSlug}:p${pStr}:s${sStr}`;
       sentences.push({
-        text: s,
-        cls,
-        chapter: currentChapter,
-        chapterSlug,
-        paraIdx,
-        sentIdx,
-        sentenceId,
-        hash: textHash(s),
+        text: s, cls, chapter: currentChapter, chapterSlug,
+        paraIdx, sentIdx, lineNum: globalLineNum,
+        sentenceId, hash: textHash(s),
         wordCount: s.split(/\s+/).filter(Boolean).length,
       });
     }
@@ -439,10 +436,10 @@ function computeHealth(findings, wordCount) {
 }
 
 function exportToXlsx(findings, name) {
-  const rows = [["Sentence ID","Hash","Chapter / Location","Flagged Sentence","Issue Type","Signal Type","Disposition","Confidence","Reason"]];
-  for (const f of findings) rows.push([f.sentenceId||"", f.hash||"", f.chapter, f.sentence, f.issue, f.signalType||"defect", f.disposition||"", f.confidence||"", f.reason||""]);
+  const rows = [["Line #","Sentence ID","Hash","Chapter / Location","Flagged Sentence","Issue Type","Signal Type","Disposition","Confidence","Reason"]];
+  for (const f of findings) rows.push([f.lineNum||"", f.sentenceId||"", f.hash||"", f.chapter, f.sentence, f.issue, f.signalType||"defect", f.disposition||"", f.confidence||"", f.reason||""]);
   const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws["!cols"] = [22,8,20,60,18,12,12,10,40].map(w=>({wch:w}));
+  ws["!cols"] = [8,22,8,20,60,18,12,12,10,40].map(w=>({wch:w}));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Findings");
   XLSX.writeFile(wb, `${name}_findings.xlsx`);
@@ -665,8 +662,14 @@ function AddSignalModal({ sentenceIndex, onSave, onClose }) {
 // SIGNAL MANAGEMENT PANEL (hamburger)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function SignalPanel({ builtinSignals, customSignals, onToggleCustom, onDeleteCustom, onAddSignal, onImport, onClose }) {
+function SignalPanel({ builtinSignals, customSignals, onToggleCustom, onDeleteCustom, onRename, onAddSignal, onImport, onClose }) {
   const importRef = useRef();
+  const [editingId, setEditingId] = useState(null);
+  const [editName,  setEditName]  = useState("");
+
+  const startRename = (sig) => { setEditingId(sig.id); setEditName(sig.name); };
+  const commitRename = (id) => { onRename(id, editName); setEditingId(null); };
+
   return (
     <div style={{ position:"fixed", inset:0, background:C.overlay, zIndex:999, display:"flex", justifyContent:"flex-end" }}
       onClick={e => e.target === e.currentTarget && onClose()}>
@@ -699,9 +702,25 @@ function SignalPanel({ builtinSignals, customSignals, onToggleCustom, onDeleteCu
           {customSignals.map(sig=>(
             <div key={sig.id} style={{ padding:"10px 0", borderBottom:`1px solid ${C.smokeLight}` }}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                <div style={{ display:"flex", alignItems:"center", gap:"8px" }}>
-                  <div style={{ fontSize:"12px", color: sig.enabled ? C.parchment : C.textMuted, letterSpacing:"0.08em" }}>{sig.name}</div>
-                  {sig.imported && <div style={{ fontSize:"8px", background:C.smokeLight, color:C.textMuted, padding:"1px 5px", letterSpacing:"0.1em" }}>IMPORTED</div>}
+                <div style={{ display:"flex", alignItems:"center", gap:"8px", flex:1, minWidth:0 }}>
+                  {editingId === sig.id ? (
+                    <input
+                      autoFocus
+                      value={editName}
+                      onChange={e=>setEditName(e.target.value)}
+                      onBlur={()=>commitRename(sig.id)}
+                      onKeyDown={e=>{ if(e.key==="Enter") commitRename(sig.id); if(e.key==="Escape") setEditingId(null); }}
+                      style={{ background:"transparent", border:"none", borderBottom:`1px solid ${C.amber}`, color:C.parchment, fontSize:"12px", fontFamily:"Barlow Condensed, sans-serif", letterSpacing:"0.08em", outline:"none", width:"100%", padding:"1px 0" }}
+                    />
+                  ) : (
+                    <div
+                      onClick={()=>startRename(sig)}
+                      title="Click to rename"
+                      style={{ fontSize:"12px", color: sig.enabled ? C.parchment : C.textMuted, letterSpacing:"0.08em", cursor:"text", flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                      {sig.name}
+                    </div>
+                  )}
+                  {sig.imported && <div style={{ fontSize:"8px", background:C.smokeLight, color:C.textMuted, padding:"1px 5px", letterSpacing:"0.1em", flexShrink:0 }}>IMPORTED</div>}
                 </div>
                 <div style={{ display:"flex", gap:"10px", alignItems:"center", flexShrink:0, marginLeft:"10px" }}>
                   <button onClick={()=>onToggleCustom(sig.id)} style={{ background:"none", border:"none", color: sig.enabled ? C.pass : C.textMuted, fontSize:"9px", letterSpacing:"0.1em", cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif" }}>
@@ -830,6 +849,7 @@ export default function App() {
   const [filterSignal,   setFilterSignal]   = useState("all");
   const [filterDisp,     setFilterDisp]     = useState("actionable");
   const [search,         setSearch]         = useState("");
+  const [sortBy,         setSortBy]         = useState("line"); // line | chapter | signal
   const [showPanel,      setShowPanel]      = useState(false);
   const [showAddModal,   setShowAddModal]   = useState(false);
   const fileInputRef = useRef();
@@ -901,6 +921,23 @@ export default function App() {
     setCustomSignals(updated); saveCustomSignals(updated);
   }, [customSignals]);
 
+  const handleRenameCustom = useCallback((id, newName) => {
+    if (!newName.trim()) return;
+    const updated = customSignals.map(s => s.id === id
+      ? { ...s, name: newName.trim(), short: newName.trim().toUpperCase().slice(0,10) }
+      : s);
+    setCustomSignals(updated); saveCustomSignals(updated);
+    // Also update issue label in active session findings
+    if (activeSession) {
+      const updatedFindings = (activeSession.findings || []).map(f =>
+        f.signal_id === id ? { ...f, issue: newName.trim().toUpperCase() } : f
+      );
+      const updatedSession = { ...activeSession, findings: updatedFindings };
+      setActiveSession(updatedSession);
+      setSessions(prev => { const next = prev.map(s => s.id === updatedSession.id ? updatedSession : s); saveSessions(next); return next; });
+    }
+  }, [customSignals, activeSession]);
+
   const handleImport = useCallback(async (file) => {
     try {
       const sheets = await parseImportedXlsx(file);
@@ -909,18 +946,35 @@ export default function App() {
       const existingFindings = activeSession?.findings || [];
       const newSignals = [];
 
+      // Build norm→lineNum lookup from sentence index
+      const indexNormMap = (sentenceIndex || []).map(s => ({
+        norm: normSentence(s.text), lineNum: s.lineNum,
+        chapter: s.chapter, sentenceId: s.sentenceId, hash: s.hash,
+      }));
+
       for (const { signalName, sentences } of sheets) {
         const deduped = deduplicateImported(sentences, existingFindings);
         const id = "imported_" + Date.now() + "_" + Math.random().toString(36).slice(2,6);
-        const findings = deduped.map(({ sentence, isDupe }) => ({
-          signal_id: id,
-          chapter: "IMPORTED",
-          sentence,
-          issue: signalName.toUpperCase(),
-          disposition: isDupe ? "excluded" : "review_only",
-          confidence: 80,
-          reason: isDupe ? "Duplicate — already caught by existing signal" : `Imported from ${file.name}`,
-        }));
+        const findings = deduped.map(({ sentence, isDupe }) => {
+          // Fuzzy-match to sentence index for lineNum + chapter
+          const norm = normSentence(sentence);
+          let lineNum = null, matchedChapter = "IMPORTED", matchedId = null, matchedHash = null, bestScore = 0;
+          for (const entry of indexNormMap) {
+            const score = overlapRatio(norm, entry.norm);
+            if (score > bestScore && score >= 0.8) {
+              bestScore = score; lineNum = entry.lineNum;
+              matchedChapter = entry.chapter; matchedId = entry.sentenceId; matchedHash = entry.hash;
+            }
+          }
+          return {
+            signal_id: id, signalType: "reader_note",
+            chapter: matchedChapter, sentenceId: matchedId, hash: matchedHash, lineNum,
+            sentence, issue: signalName.toUpperCase(),
+            disposition: isDupe ? "excluded" : "review_only",
+            confidence: 80,
+            reason: isDupe ? "Duplicate — already caught by existing signal" : `Imported from ${file.name}`,
+          };
+        });
 
         const actionableCount = findings.filter(f => f.disposition !== "excluded").length;
         const dupCount = findings.length - actionableCount;
@@ -981,12 +1035,18 @@ export default function App() {
   const prevTotal      = prevSess ? Object.values(prevSess.counts).reduce((a,b)=>a+b,0) : null;
   const dispColor      = { actionable:C.amber, review_only:C.textDim };
 
-  const filteredFindings = (activeSession?.findings||[]).filter(f => {
-    if (filterSignal!=="all" && f.signal_id!==filterSignal) return false;
-    if (filterDisp!=="all" && f.disposition!==filterDisp) return false;
-    if (search && !f.sentence.toLowerCase().includes(search.toLowerCase()) && !f.chapter.toLowerCase().includes(search.toLowerCase())) return false;
-    return true;
-  });
+  const filteredFindings = (() => {
+    let results = (activeSession?.findings||[]).filter(f => {
+      if (filterSignal!=="all" && f.signal_id!==filterSignal) return false;
+      if (filterDisp!=="all" && f.disposition!==filterDisp) return false;
+      if (search && !f.sentence.toLowerCase().includes(search.toLowerCase()) && !f.chapter.toLowerCase().includes(search.toLowerCase())) return false;
+      return true;
+    });
+    if (sortBy==="line")    results = [...results].sort((a,b)=>(a.lineNum||999999)-(b.lineNum||999999));
+    if (sortBy==="chapter") results = [...results].sort((a,b)=>a.chapter.localeCompare(b.chapter)||(a.lineNum||0)-(b.lineNum||0));
+    if (sortBy==="signal")  results = [...results].sort((a,b)=>a.signal_id.localeCompare(b.signal_id)||(a.lineNum||0)-(b.lineNum||0));
+    return results;
+  })();
 
   return (
     <div style={{ minHeight:"100vh", background:C.charcoal, color:C.parchment, fontFamily:"Barlow Condensed, sans-serif" }}>
@@ -1114,13 +1174,24 @@ export default function App() {
                 <option value="all">ALL DISPOSITIONS</option>
               </select>
               <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{ background:C.smokeDark, border:`1px solid ${C.smokeLight}`, color:C.parchment, padding:"8px 14px", fontSize:"12px", fontFamily:"Barlow Condensed, sans-serif", flex:1, minWidth:"140px", outline:"none" }} />
+              {/* Sort controls */}
+              <div style={{ display:"flex", gap:"2px" }}>
+                {[["line","LINE #"],["chapter","CHAPTER"],["signal","SIGNAL"]].map(([val,label])=>(
+                  <button key={val} onClick={()=>setSortBy(val)} style={{ background:sortBy===val?C.smokeLight:"transparent", border:`1px solid ${sortBy===val?C.amber:C.smokeLight}`, color:sortBy===val?C.parchment:C.textMuted, padding:"6px 10px", fontSize:"10px", letterSpacing:"0.1em", cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
               <span style={{ fontSize:"11px", color:C.textMuted }}>{filteredFindings.length.toLocaleString()} shown</span>
               <button onClick={()=>exportToXlsx(filteredFindings,`${activeSession.draftName}_${filterSignal}_${filterDisp}`)} style={{ background:"transparent", border:`1px solid ${C.smokeLight}`, color:C.textDim, padding:"8px 16px", fontSize:"11px", letterSpacing:"0.12em", cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif" }}>EXPORT VIEW</button>
             </div>
 
             <div style={{ display:"flex", flexDirection:"column", gap:"2px" }}>
               {filteredFindings.slice(0,500).map((f,i)=>(
-                <div key={i} style={{ display:"grid", gridTemplateColumns:"130px 90px 80px 1fr", background:i%2===0?C.smokeDark:"transparent", padding:"8px 12px", alignItems:"start" }}>
+                <div key={i} style={{ display:"grid", gridTemplateColumns:"52px 130px 90px 80px 1fr", background:i%2===0?C.smokeDark:"transparent", padding:"8px 12px", alignItems:"start" }}>
+                  <div style={{ color:C.textMuted, fontSize:"10px", fontFamily:"Barlow Condensed, sans-serif", letterSpacing:"0.04em", paddingTop:"2px", fontVariantNumeric:"tabular-nums" }}>
+                    {f.lineNum ? f.lineNum.toLocaleString() : "—"}
+                  </div>
                   <div style={{ color:C.textMuted, fontSize:"10px", letterSpacing:"0.07em", paddingTop:"2px" }}>{f.chapter.slice(0,22)}</div>
                   <div style={{ background:C.smokeLight, color:C.amber, fontSize:"9px", letterSpacing:"0.08em", padding:"2px 5px", alignSelf:"start", whiteSpace:"nowrap", overflow:"hidden" }}>{f.issue.slice(0,16)}</div>
                   <div style={{ fontSize:"9px", color:dispColor[f.disposition]||C.textMuted, paddingTop:"2px", letterSpacing:"0.06em" }}>{(f.disposition||"").toUpperCase().replace("_"," ")}{f.confidence?` ·${f.confidence}%`:""}</div>
@@ -1154,6 +1225,7 @@ export default function App() {
       {showPanel&&(
         <SignalPanel builtinSignals={BUILTIN_SIGNALS} customSignals={customSignals}
           onToggleCustom={handleToggleCustom} onDeleteCustom={handleDeleteCustom}
+          onRename={handleRenameCustom}
           onAddSignal={()=>{setShowAddModal(true); setShowPanel(false);}}
           onImport={handleImport}
           onClose={()=>setShowPanel(false)} />
