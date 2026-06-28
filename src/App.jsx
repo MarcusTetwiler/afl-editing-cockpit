@@ -170,7 +170,7 @@ function runBuiltinSignals(sentences, customSignals = []) {
       const mean = lens.reduce((a,b)=>a+b,0)/lens.length;
       const stdDev = Math.sqrt(lens.reduce((a,b)=>a+Math.pow(b-mean,2),0)/lens.length);
       if (stdDev < 3.5 && mean > 8) {
-        findings.push({ signal_id:"flat_wave", chapter, sentence:`[Para] ${sents.map(s=>s.text).join(" ").slice(0,130)}…`,
+        findings.push({ signal_id:"flat_wave", signalType:"defect", chapter, sentenceId:null, hash:null, sentence:`[Para] ${sents.map(s=>s.text).join(" ").slice(0,130)}…`,
           issue:"FLAT SENTENCE WAVE", disposition:D.REVIEW, confidence:70,
           reason:`StdDev ${stdDev.toFixed(1)}, mean ${mean.toFixed(1)} words across ${narr.length} sentences` });
       }
@@ -184,7 +184,7 @@ function runBuiltinSignals(sentences, customSignals = []) {
         if (openers[i] && openers[i].length > 1 && openers[i] === openers[i-1]) {
           streak++;
           if (streak >= 3) {
-            findings.push({ signal_id:"repeated_openers", chapter,
+            findings.push({ signal_id:"repeated_openers", signalType:"defect", chapter, sentenceId:null, hash:null,
               sentence: sents.slice(i-2,i+1).map(s=>s.text).join("  "),
               issue:"REPEATED OPENERS", disposition:D.ACTIONABLE, confidence:90,
               reason:`"${openers[i]}" opens ${streak} consecutive sentences` });
@@ -197,17 +197,17 @@ function runBuiltinSignals(sentences, customSignals = []) {
 
   // Sentence-level signals
   for (const s of sentences) {
-    const { text, cls, chapter, wordCount } = s;
+    const { text, cls, chapter, wordCount, sentenceId, hash } = s;
     if (["HEADER","FRONT_MATTER","DISPLAY_TEXT","EMPTY"].includes(cls)) continue;
 
     // 7-Word
     if (cls === "NARRATION" && wordCount > 0 && wordCount < 7) {
-      findings.push({ signal_id:"seven_word", chapter, sentence:text, issue:"7-WORD NARRATION RULE",
+      findings.push({ signal_id:"seven_word", signalType:"defect", chapter, sentenceId, hash, sentence:text, issue:"7-WORD NARRATION RULE",
         disposition:D.ACTIONABLE, confidence:85, reason:`${wordCount}-word narration sentence` });
     } else if (cls === "DIALOGUE_ACTION") {
       const p = parseDialogueSentence(text);
       if (p && p.action_word_count > 0 && p.action_word_count < 7) {
-        findings.push({ signal_id:"seven_word", chapter, sentence:text, issue:"7-WORD NARRATION RULE",
+        findings.push({ signal_id:"seven_word", signalType:"defect", chapter, sentenceId, hash, sentence:text, issue:"7-WORD NARRATION RULE",
           disposition:D.REVIEW, confidence:60, reason:`Action beat is ${p.action_word_count} words: "${p.action_beat}"` });
       }
     }
@@ -215,7 +215,7 @@ function runBuiltinSignals(sentences, customSignals = []) {
     // Interiority
     if (cls === "NARRATION") {
       const r = detectInteriority(text);
-      if (r.found) findings.push({ signal_id:"interiority", chapter, sentence:text, issue:"INTERIORITY LEAK",
+      if (r.found) findings.push({ signal_id:"interiority", signalType:"defect", chapter, sentenceId, hash, sentence:text, issue:"INTERIORITY LEAK",
         disposition: r.confidence >= 85 ? D.ACTIONABLE : D.REVIEW, confidence:r.confidence,
         reason:"Cognition verb in narration" });
     }
@@ -223,20 +223,20 @@ function runBuiltinSignals(sentences, customSignals = []) {
     // Pronoun Ambiguity
     if (cls === "NARRATION") {
       const pats = [/\b(it|this|that)\s+(was|is|had|has|did|does|would|could|should|seemed|looked|felt|appeared)\b/gi, /^(It|This|That)\s+(was|is|had|seemed|would|felt|appeared)/];
-      for (const pat of pats) { pat.lastIndex=0; if (pat.test(text)) { findings.push({ signal_id:"pronoun_ambiguity", chapter, sentence:text, issue:"PRONOUN AMBIGUITY", disposition:D.REVIEW, confidence:70, reason:"Vague pronoun with unclear referent" }); break; } }
+      for (const pat of pats) { pat.lastIndex=0; if (pat.test(text)) { findings.push({ signal_id:"pronoun_ambiguity", signalType:"defect", chapter, sentenceId, hash, sentence:text, issue:"PRONOUN AMBIGUITY", disposition:D.REVIEW, confidence:70, reason:"Vague pronoun with unclear referent" }); break; } }
     }
 
     // Filter Verb
     if (cls === "NARRATION" || cls === "DIALOGUE_ACTION") {
       const target = cls === "DIALOGUE_ACTION" ? (parseDialogueSentence(text)?.action_beat || text) : text;
       if (/\b(saw|looked|watched|noticed|realized|felt|heard|smelled|tasted|sensed|observed|spotted|glimpsed|perceived|detected)\b/gi.test(target))
-        findings.push({ signal_id:"filter_verb", chapter, sentence:text, issue:"FILTER VERB", disposition:D.REVIEW, confidence:75, reason:"Perception verb in narration" });
+        findings.push({ signal_id:"filter_verb", signalType:"defect", chapter, sentenceId, hash, sentence:text, issue:"FILTER VERB", disposition:D.REVIEW, confidence:75, reason:"Perception verb in narration" });
     }
 
     // GPS-Lite
     if (cls === "NARRATION" && wordCount >= 8) {
       const g = detectGPS(text, wordCount);
-      if (g && g.confidence >= 60) findings.push({ signal_id:"gps_lite", chapter, sentence:text,
+      if (g && g.confidence >= 60) findings.push({ signal_id:"gps_lite", signalType:"defect", chapter, sentenceId, hash, sentence:text,
         issue:`GPS: ${g.type.replace(/_/g," ")}`, disposition: g.confidence >= 75 ? D.ACTIONABLE : D.REVIEW,
         confidence:g.confidence, reason:g.reason });
     }
@@ -256,12 +256,24 @@ function runBuiltinSignals(sentences, customSignals = []) {
           if (pat.test(target)) { matched = true; break; }
         } catch {}
       }
-      if (matched) findings.push({ signal_id: cs.id, chapter, sentence: text, issue: cs.name.toUpperCase(),
+      if (matched) findings.push({ signal_id: cs.id, signalType: cs.signalType || "defect", chapter, sentenceId, hash, sentence: text, issue: cs.name.toUpperCase(),
         disposition: D.REVIEW, confidence: 75, reason: `Custom signal: ${cs.keywords.slice(0,3).join(", ")}` });
     }
   }
 
   return findings;
+}
+
+// ── Slug helpers ──────────────────────────────────────────────────────────────
+function slugify(s) {
+  return (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+}
+
+// Lightweight 6-char hash of a string (FNV-1a variant)
+function textHash(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 16777619) >>> 0; }
+  return h.toString(16).slice(0, 6);
 }
 
 // ── Parse raw text into sentence index ────────────────────────────────────────
@@ -295,28 +307,61 @@ function buildSentenceIndex(rawText) {
     if (inFrontMatter && fullText.length < 120 && !/[.!?]{1}\s*$/.test(fullText)) continue;
 
     const rawSents = fullText.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g) || [fullText];
+    const chapterSlug = slugify(currentChapter);
+    let sentIdx = 0;
     for (const rs of rawSents) {
       const s = rs.trim();
       if (!s || s.length < 4) continue;
+      sentIdx++;
       const cls = classifySentence(s);
-      sentences.push({ text: s, cls, chapter: currentChapter, paraIdx, wordCount: s.split(/\s+/).filter(Boolean).length });
+      const pStr = String(paraIdx).padStart(4, "0");
+      const sStr = String(sentIdx).padStart(3, "0");
+      const sentenceId = `${chapterSlug}:p${pStr}:s${sStr}`;
+      sentences.push({
+        text: s,
+        cls,
+        chapter: currentChapter,
+        chapterSlug,
+        paraIdx,
+        sentIdx,
+        sentenceId,
+        hash: textHash(s),
+        wordCount: s.split(/\s+/).filter(Boolean).length,
+      });
     }
   }
   return sentences;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SIGNAL TYPE SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// signalType drives dashboard language, delta direction, and card colour logic
+// defect      → count should go DOWN   — regression = bad, improvement = good
+// motif       → count should PERSIST   — no regression logic; presence is health
+// continuity  → count should PERSIST   — track anchors, flag disappearance
+// reader_note → resolve manually       — imported human/AI concerns
+
+const SIGNAL_TYPES = {
+  defect:      { label:"Defect",       color:"#C0392B", desiredDir:"down",    deltaLabel: (d) => d > 0 ? `▲ +${d} regression` : d < 0 ? `▼ ${Math.abs(d)} resolved` : "—" },
+  motif:       { label:"Motif",        color:"#D4820A", desiredDir:"persist", deltaLabel: (d) => d > 0 ? `▲ +${d}` : d < 0 ? `▼ ${Math.abs(d)}` : "—" },
+  continuity:  { label:"Continuity",   color:"#6B8F9E", desiredDir:"persist", deltaLabel: (d) => d > 0 ? `▲ +${d}` : d < 0 ? `▼ ${Math.abs(d)} missing` : "—" },
+  reader_note: { label:"Reader Note",  color:"#8A8070", desiredDir:"down",    deltaLabel: (d) => d > 0 ? `▲ +${d}` : d < 0 ? `▼ ${Math.abs(d)} resolved` : "—" },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // BUILT-IN SIGNAL DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const BUILTIN_SIGNALS = [
-  { id:"seven_word",        name:"7-Word Narration Rule",         short:"7-WORD",      description:"Narration sentences under 7 words — excludes dialogue, headers, display text", builtin:true },
-  { id:"interiority",       name:"Interiority Leak",              short:"INTERIORITY", description:"Stated thoughts, feelings, cognition — human subject + cognition verb", builtin:true },
-  { id:"pronoun_ambiguity", name:"Pronoun Ambiguity",             short:"PRONOUN",     description:'Vague "it," "this," "that" with unclear referent in narration', builtin:true },
-  { id:"repeated_openers",  name:"Repeated Openers",              short:"OPENERS",     description:"3+ consecutive sentences opening with the same word", builtin:true },
-  { id:"flat_wave",         name:"Flat Sentence Wave",            short:"FLAT WAVE",   description:"Paragraphs with monotonous sentence-length clustering", builtin:true },
-  { id:"filter_verb",       name:"Filter Verb / Perception Leak", short:"FILTER VERB", description:'"saw," "looked," "watched," "noticed" in narration', builtin:true },
-  { id:"gps_lite",          name:"GPS-Lite: Garden-Path Scanner", short:"GPS-LITE",    description:"Heuristic first-parse friction — misleading verbs, delayed referents, clause overload", builtin:true },
+  { id:"seven_word",        name:"7-Word Narration Rule",         short:"7-WORD",      signalType:"defect",      description:"Narration sentences under 7 words — excludes dialogue, headers, display text", builtin:true },
+  { id:"interiority",       name:"Interiority Leak",              short:"INTERIORITY", signalType:"defect",      description:"Stated thoughts, feelings, cognition — human subject + cognition verb", builtin:true },
+  { id:"pronoun_ambiguity", name:"Pronoun Ambiguity",             short:"PRONOUN",     signalType:"defect",      description:'Vague "it," "this," "that" with unclear referent in narration', builtin:true },
+  { id:"repeated_openers",  name:"Repeated Openers",              short:"OPENERS",     signalType:"defect",      description:"3+ consecutive sentences opening with the same word", builtin:true },
+  { id:"flat_wave",         name:"Flat Sentence Wave",            short:"FLAT WAVE",   signalType:"defect",      description:"Paragraphs with monotonous sentence-length clustering", builtin:true },
+  { id:"filter_verb",       name:"Filter Verb / Perception Leak", short:"FILTER VERB", signalType:"defect",      description:'"saw," "looked," "watched," "noticed" in narration', builtin:true },
+  { id:"gps_lite",          name:"GPS-Lite: Garden-Path Scanner", short:"GPS-LITE",    signalType:"defect",      description:"Heuristic first-parse friction — misleading verbs, delayed referents, clause overload", builtin:true },
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -394,10 +439,10 @@ function computeHealth(findings, wordCount) {
 }
 
 function exportToXlsx(findings, name) {
-  const rows = [["Chapter / Location","Flagged Sentence","Issue Type","Disposition","Confidence","Reason"]];
-  for (const f of findings) rows.push([f.chapter, f.sentence, f.issue, f.disposition||"", f.confidence||"", f.reason||""]);
+  const rows = [["Sentence ID","Hash","Chapter / Location","Flagged Sentence","Issue Type","Signal Type","Disposition","Confidence","Reason"]];
+  for (const f of findings) rows.push([f.sentenceId||"", f.hash||"", f.chapter, f.sentence, f.issue, f.signalType||"defect", f.disposition||"", f.confidence||"", f.reason||""]);
   const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws["!cols"] = [20,60,18,12,10,40].map(w=>({wch:w}));
+  ws["!cols"] = [22,8,20,60,18,12,12,10,40].map(w=>({wch:w}));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Findings");
   XLSX.writeFile(wb, `${name}_findings.xlsx`);
@@ -415,11 +460,12 @@ function trafficLight(count) {
 }
 
 function AddSignalModal({ sentenceIndex, onSave, onClose }) {
-  const [name,     setName]     = useState("");
-  const [keywords, setKeywords] = useState("");
-  const [scope,    setScope]    = useState("narration"); // narration | dialogue | all
-  const [preview,  setPreview]  = useState(null); // {count, examples}
-  const [running,  setRunning]  = useState(false);
+  const [name,       setName]       = useState("");
+  const [keywords,   setKeywords]   = useState("");
+  const [scope,      setScope]      = useState("narration");
+  const [signalType, setSignalType] = useState("defect");
+  const [preview,    setPreview]    = useState(null);
+  const [running,    setRunning]    = useState(false);
 
   const eligible = {
     narration: ["NARRATION"],
@@ -460,7 +506,7 @@ function AddSignalModal({ sentenceIndex, onSave, onClose }) {
     const kws = keywords.split(",").map(k=>k.trim()).filter(Boolean);
     if (!name.trim() || !kws.length) return;
     const id = "custom_" + Date.now();
-    onSave({ id, name: name.trim(), short: name.trim().toUpperCase().slice(0,10), description:`Custom: ${kws.slice(0,4).join(", ")}`, keywords:kws, scope, enabled:true, builtin:false });
+    onSave({ id, name: name.trim(), short: name.trim().toUpperCase().slice(0,10), description:`Custom: ${kws.slice(0,4).join(", ")}`, keywords:kws, scope, signalType, enabled:true, builtin:false });
   };
 
   const inputStyle = {
@@ -504,7 +550,7 @@ function AddSignalModal({ sentenceIndex, onSave, onClose }) {
           </div>
 
           {/* Scope */}
-          <div style={{ marginBottom:"24px" }}>
+          <div style={{ marginBottom:"20px" }}>
             <label style={labelStyle}>RUN ON</label>
             <div style={{ display:"flex", gap:"8px" }}>
               {[["narration","Narration only"],["dialogue","Dialogue only"],["all","All sentences"]].map(([val,label])=>(
@@ -517,6 +563,29 @@ function AddSignalModal({ sentenceIndex, onSave, onClose }) {
                   {label.toUpperCase()}
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/* Signal type */}
+          <div style={{ marginBottom:"24px" }}>
+            <label style={labelStyle}>SIGNAL TYPE</label>
+            <div style={{ display:"flex", gap:"8px", flexWrap:"wrap" }}>
+              {Object.entries(SIGNAL_TYPES).map(([val, meta])=>(
+                <button key={val} onClick={()=>setSignalType(val)} style={{
+                  background: signalType===val ? meta.color : C.smokeLight,
+                  color: signalType===val ? "#fff" : C.textDim,
+                  border:"none", padding:"8px 14px", fontSize:"11px", letterSpacing:"0.1em",
+                  cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif",
+                }}>
+                  {meta.label.toUpperCase()}
+                </button>
+              ))}
+            </div>
+            <div style={{ fontSize:"10px", color:C.textMuted, marginTop:"6px" }}>
+              {signalType === "defect"      && "Count should go down. Regression flagged if it rises."}
+              {signalType === "motif"       && "Count should persist or rise. No regression logic. Tracks healthy structure."}
+              {signalType === "continuity"  && "Tracks anchors across manuscript. Flags disappearance."}
+              {signalType === "reader_note" && "Imported human or AI concern. Resolve manually."}
             </div>
           </div>
 
@@ -676,22 +745,48 @@ function SignalPanel({ builtinSignals, customSignals, onToggleCustom, onDeleteCu
 
 function SignalCard({ signal, actionable, raw, prevActionable, onClick }) {
   const delta    = prevActionable !== undefined ? actionable - prevActionable : null;
-  const isPass   = actionable === 0;
-  const isRegress= delta !== null && delta > 0;
   const excluded = Math.max(0, (raw||0) - actionable);
+  const sigType  = SIGNAL_TYPES[signal.signalType] || SIGNAL_TYPES.defect;
+
+  // For defect/reader_note: down is good. For motif/continuity: direction is neutral.
+  const isDefect   = signal.signalType === "defect" || signal.signalType === "reader_note";
+  const isPass     = isDefect && actionable === 0;
+  const isRegress  = isDefect && delta !== null && delta > 0;
+  const borderColor = isRegress ? C.regress : isPass ? C.pass : C.smokeLight;
+
+  // Type accent strip at top
+  const typeColor = sigType.color;
 
   return (
-    <div onClick={onClick} style={{ background:C.smokeDark, border:`1px solid ${isRegress?C.regress:isPass?C.pass:C.smokeLight}`, padding:"16px 20px", position:"relative", cursor:"pointer" }}
+    <div onClick={onClick} style={{ background:C.smokeDark, border:`1px solid ${borderColor}`, padding:"16px 20px", position:"relative", cursor:"pointer" }}
       onMouseEnter={e=>e.currentTarget.style.borderColor=C.amber}
-      onMouseLeave={e=>e.currentTarget.style.borderColor=isRegress?C.regress:isPass?C.pass:C.smokeLight}>
-      {isRegress && <div style={{ position:"absolute", top:0, left:0, right:0, height:"2px", background:C.regress }} />}
-      {signal.builtin === false && <div style={{ position:"absolute", top:"8px", right:"10px", fontSize:"8px", color:C.textMuted, letterSpacing:"0.1em" }}>{signal.imported ? "IMPORTED" : "CUSTOM"}</div>}
-      <div style={{ fontSize:"10px", letterSpacing:"0.15em", color:C.textMuted, fontFamily:"Barlow Condensed, sans-serif", marginBottom:"8px" }}>{signal.short}</div>
+      onMouseLeave={e=>e.currentTarget.style.borderColor=borderColor}>
+      {/* Signal type accent strip */}
+      <div style={{ position:"absolute", top:0, left:0, right:0, height:"2px", background: isRegress ? C.regress : typeColor, opacity: isRegress ? 1 : 0.6 }} />
+      {signal.builtin === false && (
+        <div style={{ position:"absolute", top:"8px", right:"10px", fontSize:"8px", color:C.textMuted, letterSpacing:"0.1em" }}>
+          {signal.imported ? "IMPORTED" : "CUSTOM"}
+        </div>
+      )}
+      {/* Signal type label */}
+      <div style={{ display:"flex", alignItems:"center", gap:"6px", marginBottom:"8px" }}>
+        <div style={{ fontSize:"10px", letterSpacing:"0.15em", color:C.textMuted, fontFamily:"Barlow Condensed, sans-serif" }}>{signal.short}</div>
+        <div style={{ fontSize:"8px", letterSpacing:"0.12em", color:typeColor, fontFamily:"Barlow Condensed, sans-serif", opacity:0.85 }}>
+          {sigType.label.toUpperCase()}
+        </div>
+      </div>
       <div style={{ display:"flex", alignItems:"flex-end", gap:"10px" }}>
-        <div style={{ fontSize:"36px", fontFamily:"Barlow Condensed, sans-serif", fontWeight:700, lineHeight:1, color:isPass?C.pass:isRegress?C.regress:C.parchment }}>
+        <div style={{ fontSize:"36px", fontFamily:"Barlow Condensed, sans-serif", fontWeight:700, lineHeight:1,
+          color: isPass ? C.pass : isRegress ? C.regress : C.parchment }}>
           {actionable.toLocaleString()}
         </div>
-        {delta !== null && <div style={{ fontSize:"12px", fontFamily:"Barlow Condensed, sans-serif", color:isRegress?C.regress:C.pass, paddingBottom:"4px" }}>{isRegress?`▲ +${delta}`:delta<0?`▼ ${delta}`:"—"}</div>}
+        {delta !== null && delta !== 0 && (
+          <div style={{ fontSize:"12px", fontFamily:"Barlow Condensed, sans-serif",
+            color: isDefect ? (delta > 0 ? C.regress : C.pass) : C.textDim,
+            paddingBottom:"4px" }}>
+            {sigType.deltaLabel(delta)}
+          </div>
+        )}
         {isPass && <div style={{ fontSize:"11px", color:C.pass, paddingBottom:"4px", fontFamily:"Barlow Condensed, sans-serif" }}>✓ PASS</div>}
       </div>
       {excluded > 0 && <div style={{ fontSize:"10px", color:C.textMuted, marginTop:"3px", fontFamily:"Barlow Condensed, sans-serif" }}>{excluded.toLocaleString()} excluded</div>}
