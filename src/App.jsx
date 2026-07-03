@@ -879,6 +879,18 @@ function HealthBar({ score, prevScore }) {
   );
 }
 
+// Wrapper that resolves context before passing to EditQueue
+function EditQueueWrapper({ finding, sentenceIndex, ...props }) {
+  const ctx = (() => {
+    if (!sentenceIndex || !finding) return { before: null, after: null };
+    let idx = sentenceIndex.findIndex(s => s.sentenceId && s.sentenceId === finding.sentenceId);
+    if (idx === -1) idx = sentenceIndex.findIndex(s => s.text === finding.sentence);
+    if (idx === -1) return { before: null, after: null };
+    return { before: sentenceIndex[idx-1]?.text || null, after: sentenceIndex[idx+1]?.text || null };
+  })();
+  return <EditQueue finding={finding} contextBefore={ctx.before} contextAfter={ctx.after} {...props} />;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // API KEY MODAL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1082,7 +1094,7 @@ export default function App() {
   const [showPanel,      setShowPanel]      = useState(false);
   const [showAddModal,   setShowAddModal]   = useState(false);
   const [showApiKey,     setShowApiKey]     = useState(false);
-  const [apiKey,         setApiKey]         = useState(loadApiKey);
+  const [apiKey,         setApiKey]         = useState(loadApiKey());
   const [edits,          setEdits]          = useState(loadEdits);
   const [activeFinding,  setActiveFinding]  = useState(null);
   const fileInputRef = useRef();
@@ -1289,24 +1301,6 @@ export default function App() {
     });
   }, []);
 
-  // Get context sentences around a finding from the sentence index
-  const getContext = useCallback((finding) => {
-    if (!sentenceIndex || !finding.sentenceId) return { before: null, after: null };
-    const idx = sentenceIndex.findIndex(s => s.sentenceId === finding.sentenceId);
-    if (idx === -1) {
-      // Fall back to text match
-      const textIdx = sentenceIndex.findIndex(s => s.text === finding.sentence);
-      if (textIdx === -1) return { before: null, after: null };
-      return {
-        before: sentenceIndex[textIdx - 1]?.text || null,
-        after:  sentenceIndex[textIdx + 1]?.text || null,
-      };
-    }
-    return {
-      before: sentenceIndex[idx - 1]?.text || null,
-      after:  sentenceIndex[idx + 1]?.text || null,
-    };
-  }, [sentenceIndex]);
   const prevSess       = activeIdx > 0 ? sessions[activeIdx-1] : null;
   const totalActionable= activeSession ? Object.values(activeSession.counts).reduce((a,b)=>a+b,0) : 0;
   const totalRaw       = activeSession ? Object.values(activeSession.rawCounts||{}).reduce((a,b)=>a+b,0) : 0;
@@ -1538,21 +1532,15 @@ export default function App() {
       )}
 
       {/* Edit Queue */}
-      {activeFinding&&(()=>{
-        const ctx = getContext(activeFinding);
-        return (
-          <EditQueue
-            finding={activeFinding}
-            contextBefore={ctx.before}
-            contextAfter={ctx.after}
-            apiKey={apiKey}
-            edits={edits}
-            onEdit={handleEdit}
-            onOpenApiKey={()=>setShowApiKey(true)}
-            onClose={()=>setActiveFinding(null)}
-          />
-        );
-      })()}
+      {activeFinding && <EditQueueWrapper
+        finding={activeFinding}
+        sentenceIndex={sentenceIndex}
+        apiKey={apiKey}
+        edits={edits}
+        onEdit={handleEdit}
+        onOpenApiKey={()=>setShowApiKey(true)}
+        onClose={()=>setActiveFinding(null)}
+      />}
 
       <style>{`
         @keyframes pulse{0%,100%{opacity:.3;transform:translateX(-100%)}50%{opacity:1;transform:translateX(250%)}}
