@@ -482,10 +482,14 @@ function computeHealth(findings, wordCount) {
 }
 
 function exportToXlsx(findings, name) {
-  const rows = [["Line #","Sentence ID","Hash","Chapter / Location","Flagged Sentence","Issue Type","Signal Type","Disposition","Confidence","Reason"]];
-  for (const f of findings) rows.push([f.lineNum||"", f.sentenceId||"", f.hash||"", f.chapter, f.sentence, f.issue, f.signalType||"defect", f.disposition||"", f.confidence||"", f.reason||""]);
+  const rows = [["Line #","Sentence ID","Paragraph ID","Chapter ID","Flagged Sentence","Issue Type","Signal Type","Disposition","Confidence","Reason"]];
+  for (const f of findings) {
+    // Derive paragraph_id from sentenceId: "reese-ii:p0034:s002" → "reese-ii:p0034"
+    const paragraphId = f.sentenceId ? f.sentenceId.split(':').slice(0,2).join(':') : "";
+    rows.push([f.lineNum||"", f.sentenceId||"", paragraphId, f.chapter, f.sentence, f.issue, f.signalType||"defect", f.disposition||"", f.confidence||"", f.reason||""]);
+  }
   const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws["!cols"] = [8,22,8,20,60,18,12,12,10,40].map(w=>({wch:w}));
+  ws["!cols"] = [8,28,22,18,60,18,12,12,10,40].map(w=>({wch:w}));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Findings");
   XLSX.writeFile(wb, `${name}_findings.xlsx`);
@@ -1095,7 +1099,7 @@ export default function App() {
   const [showAddModal,   setShowAddModal]   = useState(false);
   const [showApiKey,     setShowApiKey]     = useState(false);
   const [apiKey,         setApiKey]         = useState(loadApiKey());
-  const [edits,          setEdits]          = useState(loadEdits);
+  const [edits,          setEdits]          = useState(loadEdits());
   const [activeFinding,  setActiveFinding]  = useState(null);
   const fileInputRef = useRef();
   const sentenceIndexRef = useRef(null);
@@ -1150,7 +1154,82 @@ export default function App() {
     finally { setUploading(false); setUploadStep(""); }
   }, [customSignals, allSignals]);
 
-  const handleDrop = useCallback(e => { e.preventDefault(); const f=e.dataTransfer.files[0]; if(f) handleUpload(f); }, [handleUpload]);
+  // ── Taxonomy xlsx import ──────────────────────────────────────────────────
+  const handleTaxonomyImport = useCallback(async (file) => {
+    setUploading(true);
+    const t0 = Date.now();
+    try {
+      setUploadStep("Reading taxonomy index…");
+      const ab = await file.arrayBuffer();
+      const wb = XLSX.read(ab, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rawRows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+
+      if (!rawRows.length) throw new Error("No rows found in taxonomy index.");
+
+      // Validate expected columns
+      const required = ["sentence_id","sentence_text","chapter_id","paragraph_id","version_id"];
+      const cols = Object.keys(rawRows[0]);
+      const missing = required.filter(r => !cols.includes(r));
+      if (missing.length) throw new Error(`Missing columns: ${missing.join(", ")}. Run build_afl_index.py first.`);
+
+      setUploadStep("Building sentence index from taxonomy…");
+      await new Promise(r => setTimeout(r, 60));
+
+      const index = rawRows.map((r, i) => ({
+        text:        String(r.sentence_text || ""),
+        cls:         r.is_dialogue === true || r.is_dialogue === "true" || r.is_dialogue === 1 ? "PURE_DIALOGUE" : "NARRATION",
+        chapter:     String(r.chapter_id || ""),
+        chapterSlug: String(r.chapter_id || "").toLowerCase().replace(/\s+/g, "-"),
+        paraIdx:     Number(r.paragraph_index_in_chapter) || i,
+        sentIdx:     Number(r.sentence_index_in_paragraph) || 1,
+        lineNum:     i + 1,
+        sentenceId:  String(r.sentence_id || ""),
+        paragraphId: String(r.paragraph_id || ""),
+        hash:        String(r.sentence_hash || ""),
+        wordCount:   Number(r.word_count) || String(r.sentence_text || "").split(/\s+/).filter(Boolean).length,
+      }));
+
+      setSentenceIndex(index);
+      sentenceIndexRef.current = index;
+
+      setUploadStep("Running signals…");
+      await new Promise(r => setTimeout(r, 60));
+      const findings = runBuiltinSignals(index, customSignals);
+
+      setUploadStep("Computing health…");
+      const wordCount = index.reduce((a, s) => a + s.wordCount, 0);
+      const health = computeHealth(findings, wordCount);
+      const versionId = String(rawRows[0].version_id || file.name.replace(".xlsx",""));
+
+      const counts = {}, rawCounts = {};
+      for (const sig of allSignals) { counts[sig.id] = 0; rawCounts[sig.id] = 0; }
+      for (const f of findings) {
+        rawCounts[f.signal_id] = (rawCounts[f.signal_id]||0)+1;
+        if (f.disposition !== D.EXCLUDED) counts[f.signal_id] = (counts[f.signal_id]||0)+1;
+      }
+
+      const session = {
+        id: Date.now(), draftName: versionId,
+        uploadedAt: new Date().toISOString(),
+        wordCount, health, counts, rawCounts, findings,
+        source: "taxonomy",
+      };
+      setSessions(prev => { const next=[...prev, session]; saveSessions(next); return next; });
+      setActiveSession(session);
+      setUploadTime(((Date.now()-t0)/1000).toFixed(1));
+      setActiveTab("dashboard");
+    } catch(err) { alert("Taxonomy import error: " + err.message); }
+    finally { setUploading(false); setUploadStep(""); }
+  }, [customSignals, allSignals]);
+
+  const handleDrop = useCallback(e => {
+    e.preventDefault();
+    const f = e.dataTransfer.files[0];
+    if (!f) return;
+    if (f.name.endsWith('.xlsx')) handleTaxonomyImport(f);
+    else handleUpload(f);
+  }, [handleUpload, handleTaxonomyImport]);
 
   const handleAddCustomSignal = useCallback((sig) => {
     const updated = [...customSignals, sig];
@@ -1359,11 +1438,15 @@ export default function App() {
         )}
 
         {/* Upload Zone */}
-        <div onDrop={handleDrop} onDragOver={e=>e.preventDefault()} onClick={()=>!uploading&&fileInputRef.current?.click()}
-          style={{ border:`1px dashed ${C.smokeLight}`, padding:"18px 28px", marginBottom:"28px", cursor:uploading?"default":"pointer", display:"flex", alignItems:"center", justifyContent:"space-between" }}
-          onMouseEnter={e=>{if(!uploading)e.currentTarget.style.borderColor=C.amber;}}
-          onMouseLeave={e=>{e.currentTarget.style.borderColor=C.smokeLight;}}>
-          <input ref={fileInputRef} type="file" accept=".docx" style={{ display:"none" }} onChange={e=>e.target.files[0]&&handleUpload(e.target.files[0])} />
+        <div onDrop={handleDrop} onDragOver={e=>e.preventDefault()}
+          style={{ border:`1px solid ${C.smokeLight}`, padding:"18px 28px", marginBottom:"28px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <input ref={fileInputRef} type="file" accept=".xlsx,.docx" style={{ display:"none" }}
+            onChange={e => {
+              const f = e.target.files[0];
+              if (!f) return;
+              if (f.name.endsWith('.xlsx')) handleTaxonomyImport(f);
+              else handleUpload(f);
+            }} />
           {uploading ? (
             <div>
               <div style={{ fontSize:"13px", color:C.amber, letterSpacing:"0.1em" }}>{uploadStep}</div>
@@ -1374,10 +1457,19 @@ export default function App() {
           ) : (
             <>
               <div>
-                <div style={{ fontSize:"14px", letterSpacing:"0.12em", color:C.textDim }}>DROP DRAFT — .docx</div>
-                <div style={{ fontSize:"11px", color:C.textMuted, marginTop:"4px", fontStyle:"italic", fontFamily:"IM Fell English, serif" }}>Each upload starts a new session. History preserved.</div>
+                <div style={{ display:"flex", gap:"10px", alignItems:"center", marginBottom:"8px" }}>
+                  <button onClick={()=>fileInputRef.current?.click()} style={{ background:C.amber, border:"none", color:C.charcoal, padding:"9px 20px", fontSize:"12px", letterSpacing:"0.12em", cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif", fontWeight:700 }}>
+                    IMPORT TAXONOMY .XLSX
+                  </button>
+                  <button onClick={()=>fileInputRef.current?.click()} style={{ background:"transparent", border:`1px solid ${C.smokeLight}`, color:C.textMuted, padding:"9px 14px", fontSize:"11px", letterSpacing:"0.1em", cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif" }}>
+                    or .docx fallback
+                  </button>
+                </div>
+                <div style={{ fontSize:"10px", color:C.textMuted, fontFamily:"IM Fell English, serif", fontStyle:"italic", lineHeight:1.5 }}>
+                  Run <span style={{ color:C.textDim, fontStyle:"normal", letterSpacing:"0.05em" }}>python build_afl_index.py manuscript.docx</span> first for stable sentence IDs
+                </div>
               </div>
-              <div style={{ fontSize:"11px", color:C.textMuted }}>{uploadTime?`Last run: ${uploadTime}s`:"Click or drag"}</div>
+              <div style={{ fontSize:"11px", color:C.textMuted }}>{uploadTime?`Last run: ${uploadTime}s`:""}</div>
             </>
           )}
         </div>
