@@ -369,6 +369,31 @@ const BUILTIN_SIGNALS = [
 
 const STORAGE_KEY    = "afl_cockpit_v4";
 const CUSTOM_SIG_KEY = "afl_cockpit_custom_signals";
+const API_KEY_KEY    = "afl_cockpit_api_key";
+const EDITS_KEY      = "afl_cockpit_edits";
+
+const HOUSE_RULES = `You are a line editor working on a literary war novel (The American Foreign Legion).
+
+House rules — follow all of them:
+- Preserve meaning exactly
+- Preserve rhythm and cadence
+- Preserve compression — do not expand unless expansion is the minimum fix
+- Resolve the flagged issue with the fewest possible word changes
+- Do not split a sentence unless splitting is the smallest effective repair
+- No stated interiority (no "he knew", "she felt", "he thought")
+- No filter verbs (no "saw", "watched", "noticed", "felt") unless unavoidable
+- Strict third-person limited POV — no omniscient intrusion
+- No em dashes in narration
+- Do not invent plot facts or change meaning
+- Do not rewrite dialogue
+
+Return only the revised sentence. No explanation. No preamble. No quotation marks around the output.
+If the sentence does not need revision, return it exactly as written.`;
+
+function loadApiKey() { try { return localStorage.getItem(API_KEY_KEY) || ""; } catch { return ""; } }
+function saveApiKey(k) { try { localStorage.setItem(API_KEY_KEY, k); } catch {} }
+function loadEdits() { try { return JSON.parse(localStorage.getItem(EDITS_KEY) || "{}"); } catch { return {}; } }
+function saveEdits(e) { try { localStorage.setItem(EDITS_KEY, JSON.stringify(e)); } catch {} }
 
 function loadSessions() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]"); } catch { return []; } }
 function saveSessions(s) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s.map(x=>({...x,findings:x.findings?.slice(0,2000)})))); } catch {} }
@@ -855,6 +880,189 @@ function HealthBar({ score, prevScore }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// API KEY MODAL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function ApiKeyModal({ onSave, onClose }) {
+  const [key, setKey] = useState(loadApiKey());
+  return (
+    <div style={{ position:"fixed", inset:0, background:C.overlay, zIndex:1100, display:"flex", alignItems:"center", justifyContent:"center" }}
+      onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div style={{ background:C.smokeDark, border:`1px solid ${C.smokeLight}`, width:"480px", maxWidth:"94vw", padding:"28px" }}>
+        <div style={{ fontSize:"14px", fontWeight:700, letterSpacing:"0.15em", color:C.amber, marginBottom:"8px" }}>ANTHROPIC API KEY</div>
+        <div style={{ fontSize:"11px", color:C.textMuted, fontFamily:"IM Fell English, serif", fontStyle:"italic", marginBottom:"20px", lineHeight:1.5 }}>
+          Stored in localStorage only. Never sent anywhere except api.anthropic.com.
+          Required to generate proposed revisions in the Edit Queue.
+        </div>
+        <input value={key} onChange={e=>setKey(e.target.value)} placeholder="sk-ant-..." type="password"
+          style={{ background:C.charcoal, border:`1px solid ${C.smokeLight}`, color:C.parchment, padding:"10px 14px", fontSize:"12px", fontFamily:"Barlow Condensed, sans-serif", width:"100%", outline:"none", marginBottom:"16px" }} />
+        <div style={{ display:"flex", gap:"10px", justifyContent:"flex-end" }}>
+          <button onClick={onClose} style={{ background:"transparent", border:`1px solid ${C.smokeLight}`, color:C.textDim, padding:"9px 20px", fontSize:"11px", letterSpacing:"0.12em", cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif" }}>CANCEL</button>
+          <button onClick={()=>{saveApiKey(key);onSave(key);onClose();}} style={{ background:C.amber, color:C.charcoal, border:"none", padding:"9px 24px", fontSize:"11px", letterSpacing:"0.15em", fontWeight:700, cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif" }}>SAVE KEY</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EDIT QUEUE PANEL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function EditQueue({ finding, contextBefore, contextAfter, apiKey, edits, onEdit, onOpenApiKey, onClose }) {
+  const [generating, setGenerating] = useState(false);
+  const [proposed,   setProposed]   = useState("");
+  const [customText, setCustomText] = useState("");
+  const [showCustom, setShowCustom] = useState(false);
+  const [error,      setError]      = useState("");
+
+  const editKey = finding?.sentenceId || finding?.sentence?.slice(0,60);
+  const currentEdit = edits[editKey];
+
+  useEffect(() => {
+    setProposed(""); setCustomText(""); setShowCustom(false);
+    setError(""); setGenerating(false);
+  }, [editKey]);
+
+  const generateRevision = async () => {
+    if (!apiKey) { onOpenApiKey(); return; }
+    setGenerating(true); setError(""); setProposed("");
+    try {
+      const prompt = `${HOUSE_RULES}
+
+Signal flagged: ${finding.issue}
+Reason: ${finding.reason || ""}
+Signal type: ${finding.signalType || "defect"}
+
+${contextBefore ? `Sentence before:\n"${contextBefore}"\n\n` : ""}Sentence to revise:\n"${finding.sentence}"${contextAfter ? `\n\nSentence after:\n"${contextAfter}"` : ""}`;
+
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json", "x-api-key":apiKey, "anthropic-version":"2023-06-01", "anthropic-dangerous-direct-browser-access":"true" },
+        body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:400, messages:[{role:"user",content:prompt}] }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      setProposed(data.content?.[0]?.text?.trim() || "");
+    } catch(err) { setError(err.message || "API error"); }
+    finally { setGenerating(false); }
+  };
+
+  const accept  = (text) => { onEdit(editKey, {status:"accepted", revision:text,   original:finding.sentence}); setShowCustom(false); };
+  const reject  = ()     => { onEdit(editKey, {status:"rejected", revision:null,    original:finding.sentence}); setProposed(""); setShowCustom(false); };
+  const submitCustom = () => { if(!customText.trim()) return; onEdit(editKey, {status:"custom", revision:customText.trim(), original:finding.sentence}); setShowCustom(false); };
+
+  if (!finding) return null;
+  const statusColor = {accepted:C.pass, rejected:C.regress, custom:C.amber};
+  const isResolved  = currentEdit?.status !== undefined;
+  const btn = (bg, fg="#fff", disabled=false) => ({
+    background:disabled?C.smokeLight:bg, color:disabled?C.textMuted:fg,
+    border:"none", padding:"9px 18px", fontSize:"11px", letterSpacing:"0.12em",
+    cursor:disabled?"default":"pointer", fontFamily:"Barlow Condensed, sans-serif", fontWeight:700,
+  });
+
+  return (
+    <div style={{ position:"fixed", bottom:0, left:0, right:0, background:C.smokeDark, borderTop:`2px solid ${C.amber}`, zIndex:500, maxHeight:"52vh", overflowY:"auto" }}>
+      {/* Header */}
+      <div style={{ padding:"10px 24px", borderBottom:`1px solid ${C.smokeLight}`, display:"flex", alignItems:"center", justifyContent:"space-between", position:"sticky", top:0, background:C.smokeDark, zIndex:1 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:"16px", flexWrap:"wrap" }}>
+          <span style={{ fontSize:"11px", fontWeight:700, letterSpacing:"0.2em", color:C.amber }}>EDIT QUEUE</span>
+          <span style={{ fontSize:"9px", color:C.textMuted, letterSpacing:"0.1em" }}>
+            {finding.sentenceId||"—"} · L{finding.lineNum||"—"} · {finding.chapter?.slice(0,28)}
+          </span>
+          <span style={{ fontSize:"9px", background:C.smokeLight, color:C.amber, padding:"1px 6px", letterSpacing:"0.08em" }}>{finding.issue}</span>
+          {isResolved && <span style={{ fontSize:"9px", letterSpacing:"0.1em", color:statusColor[currentEdit.status], fontWeight:700 }}>{currentEdit.status.toUpperCase()}</span>}
+        </div>
+        <button onClick={onClose} style={{ background:"none", border:"none", color:C.textMuted, fontSize:"18px", cursor:"pointer", lineHeight:1 }}>×</button>
+      </div>
+
+      <div style={{ padding:"16px 24px", display:"grid", gridTemplateColumns:"1fr 1fr", gap:"24px" }}>
+        {/* LEFT — context */}
+        <div>
+          {contextBefore && (
+            <div style={{ marginBottom:"10px" }}>
+              <div style={{ fontSize:"9px", letterSpacing:"0.15em", color:C.textMuted, marginBottom:"3px" }}>BEFORE</div>
+              <div style={{ fontSize:"12px", color:C.textMuted, fontFamily:"IM Fell English, serif", lineHeight:1.6, fontStyle:"italic" }}>{contextBefore}</div>
+            </div>
+          )}
+          <div style={{ marginBottom:"10px" }}>
+            <div style={{ fontSize:"9px", letterSpacing:"0.15em", color:C.amber, marginBottom:"3px" }}>FLAGGED</div>
+            <div style={{ fontSize:"13px", color:C.parchment, fontFamily:"IM Fell English, serif", lineHeight:1.7, borderLeft:`2px solid ${C.amber}`, paddingLeft:"12px" }}>{finding.sentence}</div>
+          </div>
+          {contextAfter && (
+            <div style={{ marginBottom:"10px" }}>
+              <div style={{ fontSize:"9px", letterSpacing:"0.15em", color:C.textMuted, marginBottom:"3px" }}>AFTER</div>
+              <div style={{ fontSize:"12px", color:C.textMuted, fontFamily:"IM Fell English, serif", lineHeight:1.6, fontStyle:"italic" }}>{contextAfter}</div>
+            </div>
+          )}
+          {finding.reason && <div style={{ fontSize:"10px", color:C.textMuted, marginTop:"6px", letterSpacing:"0.06em" }}>↳ {finding.reason}</div>}
+        </div>
+
+        {/* RIGHT — revision workspace */}
+        <div>
+          {/* Resolved state */}
+          {isResolved && (
+            <div style={{ marginBottom:"14px", padding:"10px 14px", background:C.charcoal, borderLeft:`2px solid ${statusColor[currentEdit.status]}` }}>
+              <div style={{ fontSize:"9px", letterSpacing:"0.15em", color:statusColor[currentEdit.status], marginBottom:"4px" }}>{currentEdit.status.toUpperCase()}</div>
+              {currentEdit.revision && <div style={{ fontSize:"13px", color:C.dimParch, fontFamily:"IM Fell English, serif", lineHeight:1.6 }}>{currentEdit.revision}</div>}
+              <button onClick={()=>onEdit(editKey,null)} style={{ ...btn(C.smokeLight,C.textDim), marginTop:"10px", fontSize:"10px", padding:"5px 12px" }}>UNDO</button>
+            </div>
+          )}
+
+          {/* Generate button */}
+          {!isResolved && (
+            <button onClick={generateRevision} disabled={generating} style={{ ...btn(C.amber,C.charcoal,generating), marginBottom:"14px", width:"100%", padding:"11px" }}>
+              {generating?"GENERATING…":apiKey?"GENERATE REVISION ▶":"SET API KEY TO GENERATE"}
+            </button>
+          )}
+
+          {error && <div style={{ fontSize:"11px", color:C.regress, marginBottom:"10px" }}>⚠ {error}</div>}
+
+          {/* Proposed */}
+          {proposed && !isResolved && (
+            <div style={{ marginBottom:"14px" }}>
+              <div style={{ fontSize:"9px", letterSpacing:"0.15em", color:C.textMuted, marginBottom:"6px" }}>PROPOSED</div>
+              <div style={{ fontSize:"13px", color:C.dimParch, fontFamily:"IM Fell English, serif", lineHeight:1.7, padding:"10px 14px", background:C.charcoal, borderLeft:`2px solid ${C.pass}`, marginBottom:"10px" }}>{proposed}</div>
+              <div style={{ display:"flex", gap:"8px", flexWrap:"wrap" }}>
+                <button onClick={()=>accept(proposed)} style={btn(C.pass)}>✓ ACCEPT</button>
+                <button onClick={reject}               style={btn(C.regress)}>✗ REJECT</button>
+                <button onClick={()=>setShowCustom(v=>!v)} style={btn(C.smokeLight,C.textDim)}>✎ CUSTOM</button>
+              </div>
+            </div>
+          )}
+
+          {/* No-proposed actions */}
+          {!proposed && !isResolved && !generating && (
+            <div style={{ display:"flex", gap:"8px", marginBottom:"14px" }}>
+              <button onClick={reject}                    style={btn(C.smokeLight,C.textDim)}>✗ REJECT / SKIP</button>
+              <button onClick={()=>setShowCustom(v=>!v)} style={btn(C.smokeLight,C.textDim)}>✎ WRITE CUSTOM</button>
+            </div>
+          )}
+
+          {/* Custom textarea */}
+          {showCustom && !isResolved && (
+            <div>
+              <div style={{ fontSize:"9px", letterSpacing:"0.15em", color:C.textMuted, marginBottom:"6px" }}>YOUR REVISION</div>
+              <textarea value={customText} onChange={e=>setCustomText(e.target.value)}
+                placeholder="Type your revision here…" rows={3}
+                style={{ width:"100%", background:C.charcoal, border:`1px solid ${C.amber}`, color:C.parchment, padding:"10px 12px", fontSize:"13px", fontFamily:"IM Fell English, serif", resize:"vertical", outline:"none", lineHeight:1.6 }} />
+              <div style={{ display:"flex", gap:"8px", marginTop:"8px" }}>
+                <button onClick={submitCustom} disabled={!customText.trim()} style={btn(C.amber,C.charcoal,!customText.trim())}>SAVE CUSTOM</button>
+                <button onClick={()=>{setShowCustom(false);setCustomText("");}} style={btn(C.smokeLight,C.textDim)}>CANCEL</button>
+              </div>
+            </div>
+          )}
+
+          {!apiKey && !isResolved && (
+            <button onClick={onOpenApiKey} style={{ ...btn("transparent",C.textMuted), border:`1px solid ${C.smokeLight}`, fontSize:"10px", marginTop:"8px" }}>⚙ SET API KEY</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -873,6 +1081,10 @@ export default function App() {
   const [sortBy,         setSortBy]         = useState("line"); // line | chapter | signal
   const [showPanel,      setShowPanel]      = useState(false);
   const [showAddModal,   setShowAddModal]   = useState(false);
+  const [showApiKey,     setShowApiKey]     = useState(false);
+  const [apiKey,         setApiKey]         = useState(loadApiKey);
+  const [edits,          setEdits]          = useState(loadEdits);
+  const [activeFinding,  setActiveFinding]  = useState(null);
   const fileInputRef = useRef();
   const sentenceIndexRef = useRef(null);
 
@@ -1067,7 +1279,34 @@ export default function App() {
     }
   }, [activeSession, customSignals]);
 
-  const activeIdx      = sessions.findIndex(s=>s.id===activeSession?.id);
+  const handleEdit = useCallback((editKey, editData) => {
+    setEdits(prev => {
+      const next = editData === null
+        ? (() => { const e = {...prev}; delete e[editKey]; return e; })()
+        : { ...prev, [editKey]: editData };
+      saveEdits(next);
+      return next;
+    });
+  }, []);
+
+  // Get context sentences around a finding from the sentence index
+  const getContext = useCallback((finding) => {
+    if (!sentenceIndex || !finding.sentenceId) return { before: null, after: null };
+    const idx = sentenceIndex.findIndex(s => s.sentenceId === finding.sentenceId);
+    if (idx === -1) {
+      // Fall back to text match
+      const textIdx = sentenceIndex.findIndex(s => s.text === finding.sentence);
+      if (textIdx === -1) return { before: null, after: null };
+      return {
+        before: sentenceIndex[textIdx - 1]?.text || null,
+        after:  sentenceIndex[textIdx + 1]?.text || null,
+      };
+    }
+    return {
+      before: sentenceIndex[idx - 1]?.text || null,
+      after:  sentenceIndex[idx + 1]?.text || null,
+    };
+  }, [sentenceIndex]);
   const prevSess       = activeIdx > 0 ? sessions[activeIdx-1] : null;
   const totalActionable= activeSession ? Object.values(activeSession.counts).reduce((a,b)=>a+b,0) : 0;
   const totalRaw       = activeSession ? Object.values(activeSession.rawCounts||{}).reduce((a,b)=>a+b,0) : 0;
@@ -1106,10 +1345,14 @@ export default function App() {
           <button onClick={()=>setShowPanel(true)} style={{ background:"none", border:`1px solid ${C.smokeLight}`, color:C.textDim, padding:"7px 12px", cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif", fontSize:"16px", marginLeft:"8px", lineHeight:1 }} title="Signal management">
             ☰
           </button>
+          {/* API Key */}
+          <button onClick={()=>setShowApiKey(true)} style={{ background: apiKey?"none":C.regress, border:`1px solid ${apiKey?C.smokeLight:C.regress}`, color: apiKey?C.textMuted:C.parchment, padding:"7px 10px", cursor:"pointer", fontFamily:"Barlow Condensed, sans-serif", fontSize:"11px", marginLeft:"4px", letterSpacing:"0.1em" }} title="Set API key for Edit Queue">
+            ⚙
+          </button>
         </div>
       </div>
 
-      <div style={{ padding:"28px 32px", maxWidth:"1160px", margin:"0 auto" }}>
+      <div style={{ padding:"28px 32px", maxWidth:"1160px", margin:"0 auto", paddingBottom: activeFinding?"340px":"28px" }}>
         {/* Version Rail */}
         {sessions.length > 0 && (
           <div style={{ display:"flex", gap:"8px", flexWrap:"wrap", marginBottom:"20px" }}>
@@ -1226,11 +1469,21 @@ export default function App() {
             </div>
 
             <div style={{ display:"flex", flexDirection:"column", gap:"2px" }}>
-              {filteredFindings.slice(0,500).map((f,i)=>(
-                <div key={i} style={{ display:"grid", gridTemplateColumns:"52px 130px 90px 80px 1fr", background:i%2===0?C.smokeDark:"transparent", padding:"8px 12px", alignItems:"start" }}>
-                  <div style={{ color:C.textMuted, fontSize:"10px", fontFamily:"Barlow Condensed, sans-serif", letterSpacing:"0.04em", paddingTop:"2px", fontVariantNumeric:"tabular-nums" }}>
-                    {f.lineNum ? f.lineNum.toLocaleString() : "—"}
-                  </div>
+              {filteredFindings.slice(0,500).map((f,i)=>{
+                const editKey = f.sentenceId || f.sentence?.slice(0,60);
+                const edit = edits[editKey];
+                const isActive = activeFinding && (activeFinding.sentenceId===f.sentenceId && activeFinding.sentence===f.sentence);
+                const editBg = edit?.status==="accepted"?`${C.pass}22`:edit?.status==="rejected"?`${C.regress}11`:edit?.status==="custom"?`${C.amber}11`:null;
+                return (
+                <div key={i} onClick={()=>setActiveFinding(isActive?null:f)}
+                  style={{ display:"grid", gridTemplateColumns:"52px 130px 90px 80px 1fr 60px",
+                    background: isActive ? `${C.amber}18` : editBg || (i%2===0?C.smokeDark:"transparent"),
+                    padding:"8px 12px", alignItems:"start", cursor:"pointer",
+                    borderLeft: isActive ? `2px solid ${C.amber}` : "2px solid transparent",
+                  }}
+                  onMouseEnter={e=>{if(!isActive)e.currentTarget.style.background=`${C.amber}0A`;}}
+                  onMouseLeave={e=>{if(!isActive)e.currentTarget.style.background=editBg||(i%2===0?C.smokeDark:"transparent");}}>
+                  <div style={{ color:C.textMuted, fontSize:"10px", letterSpacing:"0.04em", paddingTop:"2px", fontVariantNumeric:"tabular-nums" }}>{f.lineNum?f.lineNum.toLocaleString():"—"}</div>
                   <div style={{ color:C.textMuted, fontSize:"10px", letterSpacing:"0.07em", paddingTop:"2px" }}>{f.chapter.slice(0,22)}</div>
                   <div style={{ background:C.smokeLight, color:C.amber, fontSize:"9px", letterSpacing:"0.08em", padding:"2px 5px", alignSelf:"start", whiteSpace:"nowrap", overflow:"hidden" }}>{f.issue.slice(0,16)}</div>
                   <div style={{ fontSize:"9px", color:dispColor[f.disposition]||C.textMuted, paddingTop:"2px", letterSpacing:"0.06em" }}>{(f.disposition||"").toUpperCase().replace("_"," ")}{f.confidence?` ·${f.confidence}%`:""}</div>
@@ -1238,8 +1491,12 @@ export default function App() {
                     {f.sentence.slice(0,300)}
                     {f.reason&&<span style={{ display:"block", fontSize:"10px", color:C.textMuted, fontFamily:"Barlow Condensed, sans-serif", marginTop:"2px", fontStyle:"normal" }}>{f.reason}</span>}
                   </div>
+                  <div style={{ fontSize:"9px", color: edit?.status==="accepted"?C.pass:edit?.status==="rejected"?C.regress:edit?.status==="custom"?C.amber:C.textMuted, textAlign:"right", paddingTop:"2px", letterSpacing:"0.06em", flexShrink:0 }}>
+                    {edit?.status?edit.status.toUpperCase():""}
+                  </div>
                 </div>
-              ))}
+                );
+              })}
               {filteredFindings.length>500&&<div style={{ textAlign:"center", padding:"16px", color:C.textMuted, fontSize:"11px" }}>Showing 500 of {filteredFindings.length.toLocaleString()} — export xlsx for full list</div>}
               {filteredFindings.length===0&&<div style={{ textAlign:"center", padding:"40px", color:C.textMuted, fontSize:"12px", letterSpacing:"0.1em" }}>NO FINDINGS MATCH CURRENT FILTERS</div>}
             </div>
@@ -1274,6 +1531,28 @@ export default function App() {
       {showAddModal&&(
         <AddSignalModal sentenceIndex={sentenceIndex} onSave={handleAddCustomSignal} onClose={()=>setShowAddModal(false)} />
       )}
+
+      {/* API Key Modal */}
+      {showApiKey&&(
+        <ApiKeyModal onSave={k=>{setApiKey(k);}} onClose={()=>setShowApiKey(false)} />
+      )}
+
+      {/* Edit Queue */}
+      {activeFinding&&(()=>{
+        const ctx = getContext(activeFinding);
+        return (
+          <EditQueue
+            finding={activeFinding}
+            contextBefore={ctx.before}
+            contextAfter={ctx.after}
+            apiKey={apiKey}
+            edits={edits}
+            onEdit={handleEdit}
+            onOpenApiKey={()=>setShowApiKey(true)}
+            onClose={()=>setActiveFinding(null)}
+          />
+        );
+      })()}
 
       <style>{`
         @keyframes pulse{0%,100%{opacity:.3;transform:translateX(-100%)}50%{opacity:1;transform:translateX(250%)}}
