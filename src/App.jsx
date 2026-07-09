@@ -330,7 +330,46 @@ export default function App(){
       </div>
     </div>
     <div style={{padding:"28px 32px",maxWidth:"1160px",margin:"0 auto"}}>
-      {sessions.length>0&&(<div style={{display:"flex",gap:"8px",flexWrap:"wrap",marginBottom:"20px"}}>{sessions.map(s=>(<div key={s.id} onClick={()=>setActiveSession(s)} style={{padding:"4px 12px",cursor:"pointer",background:s.id===activeSession?.id?C.amber:C.smokeLight,color:s.id===activeSession?.id?C.charcoal:C.textDim,fontFamily:"Barlow Condensed, sans-serif",fontSize:"12px",letterSpacing:"0.1em",fontWeight:s.id===activeSession?.id?700:400}}>{s.draftName} <span style={{opacity:0.7}}>{s.health}</span>{s.source==="taxonomy"&&<span style={{marginLeft:"4px",fontSize:"8px",opacity:0.6}}>IDX</span>}</div>))}</div>)}
+      {/* Version progression strip — replaces both chip rail and bottom timeline */}
+      {sessions.length>0&&(
+        <div style={{marginBottom:"24px",overflowX:"auto",paddingBottom:"4px"}}>
+          <div style={{display:"flex",alignItems:"center",minWidth:"min-content",gap:"0"}}>
+            {sessions.map((s,i)=>{
+              const isActive=s.id===activeSession?.id;
+              const prev=sessions[i-1];
+              const delta=prev?s.health-prev.health:null;
+              const scoreColor=delta===null?C.textDim:delta>0?C.pass:delta<0?C.regress:C.textDim;
+              return(
+                <div key={s.id} style={{display:"flex",alignItems:"center"}}>
+                  {i>0&&(
+                    <div style={{display:"flex",alignItems:"center",margin:"0 2px"}}>
+                      <div style={{width:"24px",height:"1px",background:delta>0?C.pass:delta<0?C.regress:C.smokeLight}}/>
+                      <div style={{fontSize:"9px",color:delta>0?C.pass:delta<0?C.regress:C.smokeLight,marginLeft:"2px",marginRight:"2px",lineHeight:1}}>{delta>0?"↑":delta<0?"↓":"→"}</div>
+                      <div style={{width:"4px",height:"1px",background:delta>0?C.pass:delta<0?C.regress:C.smokeLight}}/>
+                    </div>
+                  )}
+                  <div onClick={()=>setActiveSession(s)} style={{cursor:"pointer",padding:"6px 10px",borderBottom:isActive?`2px solid ${C.amber}`:"2px solid transparent",transition:"all 0.15s",minWidth:"72px",textAlign:"center"}}
+                    onMouseEnter={e=>e.currentTarget.style.background=C.smokeDark}
+                    onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                    <div style={{fontSize:"18px",fontWeight:700,fontFamily:"Barlow Condensed, sans-serif",color:isActive?C.amber:scoreColor,lineHeight:1,marginBottom:"3px"}}>{s.health}</div>
+                    <div style={{fontSize:"9px",color:isActive?C.parchment:C.textMuted,letterSpacing:"0.06em",fontFamily:"Barlow Condensed, sans-serif",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"80px"}}>{s.draftName}</div>
+                    {s.source==="taxonomy"&&<div style={{width:"4px",height:"4px",borderRadius:"50%",background:C.pass,margin:"2px auto 0"}}/>}
+                  </div>
+                </div>
+              );
+            })}
+            {/* Add new button */}
+            <div style={{marginLeft:"8px",display:"flex",alignItems:"center"}}>
+              <div style={{width:"20px",height:"1px",background:C.smokeLight}}/>
+              <div onClick={()=>fileInputRef.current?.click()} style={{cursor:"pointer",padding:"6px 10px",color:C.textMuted,fontSize:"10px",letterSpacing:"0.1em",fontFamily:"Barlow Condensed, sans-serif",whiteSpace:"nowrap",border:`1px dashed ${C.smokeLight}`,marginLeft:"4px"}}
+                onMouseEnter={e=>{e.currentTarget.style.color=C.amber;e.currentTarget.style.borderColor=C.amber;}}
+                onMouseLeave={e=>{e.currentTarget.style.color=C.textMuted;e.currentTarget.style.borderColor=C.smokeLight;}}>
+                + ADD DRAFT
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       <div onDrop={handleDrop} onDragOver={e=>e.preventDefault()} style={{border:`1px solid ${C.smokeLight}`,padding:"18px 28px",marginBottom:"28px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
         <input ref={fileInputRef} type="file" accept=".xlsx,.docx" style={{display:"none"}} onChange={e=>{const f=e.target.files[0];if(!f)return;if(f.name.endsWith(".xlsx"))handleTaxonomyImport(f);else handleUpload(f);}}/>
         {uploading?(<div><div style={{fontSize:"13px",color:C.amber,letterSpacing:"0.1em"}}>{uploadStep}</div><div style={{width:"220px",height:"2px",background:C.smokeLight,marginTop:"10px",overflow:"hidden"}}><div style={{height:"100%",background:C.amber,width:"40%",animation:"pulse 1.4s ease-in-out infinite"}}/></div></div>):(<><div><div style={{display:"flex",gap:"10px",alignItems:"center",marginBottom:"8px"}}><button onClick={()=>fileInputRef.current?.click()} style={{background:C.amber,border:"none",color:C.charcoal,padding:"9px 20px",fontSize:"12px",letterSpacing:"0.12em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",fontWeight:700}}>IMPORT TAXONOMY .XLSX</button><button onClick={()=>fileInputRef.current?.click()} style={{background:"transparent",border:`1px solid ${C.smokeLight}`,color:C.textMuted,padding:"9px 14px",fontSize:"11px",letterSpacing:"0.1em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif"}}>or .docx fallback</button></div><div style={{fontSize:"10px",color:C.textMuted,fontFamily:"IM Fell English, serif",fontStyle:"italic"}}>Run <span style={{color:C.textDim,fontStyle:"normal"}}>python build_afl_index.py manuscript.docx</span> first for stable IDs</div></div><div style={{fontSize:"11px",color:C.textMuted}}>{uploadTime?`Last run: ${uploadTime}s`:""}</div></>)}
@@ -375,7 +414,6 @@ export default function App(){
       </div>)}
       {activeTab==="review"&&<div style={{padding:"0 32px 28px",maxWidth:"1160px",margin:"0 auto"}}><ReviewQueue findings={ff} draftName={activeSession?.draftName||""} onDismiss={handleDismiss}/></div>}
     </div>
-    {sessions.length>=2&&activeSession&&(<div style={{borderTop:`1px solid ${C.smokeLight}`,padding:"14px 32px",display:"flex",gap:"32px",alignItems:"center"}}><div style={{fontSize:"10px",letterSpacing:"0.15em",color:C.textMuted,flexShrink:0}}>HEALTH TIMELINE</div>{sessions.map(s=>(<div key={s.id} onClick={()=>setActiveSession(s)} style={{cursor:"pointer",textAlign:"center",opacity:s.id===activeSession.id?1:0.45}}><div style={{fontSize:"20px",fontWeight:700,color:C.amber,fontFamily:"Barlow Condensed, sans-serif"}}>{s.health}</div><div style={{fontSize:"9px",color:C.textMuted,letterSpacing:"0.08em"}}>{s.draftName}</div></div>))}</div>)}
     {showPanel&&<SignalPanel builtinSignals={BUILTIN_SIGNALS} customSignals={customSignals} onToggleCustom={toggleCustom} onDeleteCustom={deleteCustom} onRename={renameCustom} onAddSignal={()=>{setShowAddModal(true);setShowPanel(false);}} onImport={importFindings} onClose={()=>setShowPanel(false)}/>}
     {showAddModal&&<AddSignalModal sentenceIndex={sentenceIndex} onSave={addCustomSignal} onClose={()=>setShowAddModal(false)}/>}
     <style>{`@keyframes pulse{0%,100%{opacity:.3;transform:translateX(-100%)}50%{opacity:1;transform:translateX(250%)}}@keyframes rqpop{0%{transform:scale(0.97);opacity:0.5}100%{transform:scale(1);opacity:1}}input::placeholder{color:#8A8070;}select option{background:#2A2A2A;}::-webkit-scrollbar{width:6px;}::-webkit-scrollbar-track{background:#1C1C1C;}::-webkit-scrollbar-thumb{background:#3A3938;}`}</style>
