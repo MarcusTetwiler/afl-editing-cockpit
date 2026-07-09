@@ -138,293 +138,150 @@ function SignalCard({signal,actionable,raw,prevActionable,onClick}){
 function HealthBar({score,prevScore}){const d=prevScore!==undefined?(score-prevScore).toFixed(1):null;const p=Math.max(0,Math.min(100,((score-40)/60)*100));return(<div style={{marginBottom:"28px"}}><div style={{display:"flex",alignItems:"baseline",gap:"16px",marginBottom:"10px"}}><div style={{fontSize:"64px",fontFamily:"Barlow Condensed, sans-serif",fontWeight:700,color:C.amber,lineHeight:1}}>{score}</div><div><div style={{fontSize:"14px",color:C.textMuted,letterSpacing:"0.12em",fontFamily:"Barlow Condensed, sans-serif"}}>/ 100</div>{d!==null&&<div style={{fontSize:"15px",fontFamily:"Barlow Condensed, sans-serif",color:parseFloat(d)>=0?C.pass:C.regress}}>{parseFloat(d)>=0?`▲ +${d}`:`▼ ${d}`} since previous</div>}</div></div><div style={{height:"3px",background:C.smokeLight}}><div style={{height:"100%",width:`${p}%`,background:`linear-gradient(90deg,${C.amber},${C.redOrange})`}}/></div></div>);}
 
 // ── Review Queue ──────────────────────────────────────────────────────────────
-const RQ_KEY = "afl_review_queue_v1";
-const RQ_STATUS = { FIX:"Fix", SKIP:"Skip", DESKTOP:"Needs Desktop" };
-const RQ_HEADER_HINTS = ["target","location","prompt","finding","note","status","chapter","id","text","sentence","context","flagged","issue","reason","line"];
+const RQ_KEY="afl_review_queue_v1";
+const RQ_STATUS={FIX:"Fix",SKIP:"Skip",DESKTOP:"Needs Desktop"};
 
-function rqLooksLikeHeader(row){
-  if(!row||!row.length) return false;
-  const cells=row.filter(c=>c!==null&&c!==undefined&&String(c).trim()!=="");
-  if(!cells.length) return false;
-  let hits=0;
-  for(const c of cells){const s=String(c).toLowerCase().trim();if(s.length<=40&&RQ_HEADER_HINTS.some(h=>s.includes(h)))hits++;}
-  return hits>=Math.max(1,Math.floor(cells.length/2));
-}
-function rqColLetter(i){let s="";i=i+1;while(i>0){const m=(i-1)%26;s=String.fromCharCode(65+m)+s;i=Math.floor((i-1)/26);}return s;}
-
-function ReviewQueue(){
-  const[phase,setPhase]=useState("loading");
-  const[fileName,setFileName]=useState("");
-  const[headers,setHeaders]=useState([]);
-  const[rows,setRows]=useState([]);
-  const[entries,setEntries]=useState([]);
+function ReviewQueue({findings,draftName}){
+  const[reviews,setReviews]=useState(()=>{try{return JSON.parse(localStorage.getItem(RQ_KEY)||"{}");}catch{return{};}});
   const[index,setIndex]=useState(0);
   const[draft,setDraft]=useState("");
   const[sessionCount,setSessionCount]=useState(0);
   const[toast,setToast]=useState("");
   const[popKey,setPopKey]=useState(0);
-  const fileRef=useRef(null);
   const toastTimer=useRef(null);
+  const total=findings.length;
+  const fkey=f=>f.sentenceId||f.sentence?.slice(0,80)||"x";
 
-  // Restore session
   useEffect(()=>{
-    try{
-      const raw=localStorage.getItem(RQ_KEY);
-      if(raw){
-        const s=JSON.parse(raw);
-        if(s.rows&&s.rows.length){
-          setFileName(s.fileName||"");setHeaders(s.headers||[]);setRows(s.rows);
-          setEntries(s.entries||s.rows.map(()=>({note:"",status:"",ts:""})));
-          setIndex(Math.min(s.index||0,s.rows.length-1));
-          setPhase(s.phase==="done"?"done":"review");return;
-        }
-      }
-    }catch(e){}
-    setPhase("empty");
-  },[]);
+    const first=findings.findIndex(f=>!reviews[fkey(f)]?.status);
+    setIndex(first===-1?0:first);
+  },[findings.length]);
 
-  // Sync draft with current entry
   useEffect(()=>{
-    if(phase==="review"&&entries[index]) setDraft(entries[index].note||"");
-  },[index,phase]);
+    const f=findings[index];
+    if(f) setDraft(reviews[fkey(f)]?.note||"");
+  },[index,findings]);
 
-  const reviewedCount=useMemo(()=>entries.filter(e=>e.status).length,[entries]);
-  const total=rows.length;
+  const reviewedCount=useMemo(()=>findings.filter(f=>reviews[fkey(f)]?.status).length,[reviews,findings]);
   const pct=total?Math.round((reviewedCount/total)*100):0;
 
-  function saveSession(state){
-    try{localStorage.setItem(RQ_KEY,JSON.stringify(state));}catch(e){}
-  }
-  function showToast(msg){
-    setToast(msg);
-    if(toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current=setTimeout(()=>setToast(""),1600);
-  }
+  function saveR(r){setReviews(r);try{localStorage.setItem(RQ_KEY,JSON.stringify(r));}catch{}}
+  function showToast(msg){setToast(msg);if(toastTimer.current)clearTimeout(toastTimer.current);toastTimer.current=setTimeout(()=>setToast(""),1600);}
 
-  async function handleFile(file){
-    if(!file) return;
-    try{
-      const buf=await file.arrayBuffer();
-      const wb=XLSX.read(buf);
-      const ws=wb.Sheets[wb.SheetNames[0]];
-      const raw=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
-      const nonEmpty=raw.filter(r=>r.some(c=>String(c).trim()!==""));
-      if(!nonEmpty.length){showToast("Sheet looks empty");return;}
-      let hdrs,data;
-      if(rqLooksLikeHeader(nonEmpty[0])){
-        hdrs=nonEmpty[0].map((h,i)=>String(h).trim()||rqColLetter(i));
-        data=nonEmpty.slice(1);
-      }else{
-        const w=Math.max(...nonEmpty.map(r=>r.length));
-        hdrs=Array.from({length:w},(_,i)=>rqColLetter(i));
-        data=nonEmpty;
-      }
-      const noteCol=hdrs.findIndex(h=>/author note/i.test(h));
-      const statusCol=hdrs.findIndex(h=>/^status$/i.test(h));
-      const ents=data.map(r=>({note:noteCol>=0?String(r[noteCol]||""):"",status:statusCol>=0?String(r[statusCol]||""):"",ts:""}));
-      const keepIdx=hdrs.map((_,i)=>i).filter(i=>i!==noteCol&&i!==statusCol);
-      const cleanHdrs=keepIdx.map(i=>hdrs[i]);
-      const cleanRows=data.map(r=>keepIdx.map(i=>r[i]!==undefined?r[i]:""));
-      const firstUnreviewed=ents.findIndex(e=>!e.status);
-      const startAt=firstUnreviewed===-1?0:firstUnreviewed;
-      setFileName(file.name);setHeaders(cleanHdrs);setRows(cleanRows);
-      setEntries(ents);setIndex(startAt);setSessionCount(0);setPhase("review");
-      saveSession({fileName:file.name,headers:cleanHdrs,rows:cleanRows,entries:ents,index:startAt,phase:"review"});
-    }catch(e){showToast("Couldn't read file — is it .xlsx?");}
-  }
-
-  function advanceFrom(i,ents){
-    for(let step=1;step<=ents.length;step++){const j=(i+step)%ents.length;if(!ents[j].status)return j;}
+  function advanceFrom(i,revs){
+    for(let s=1;s<=findings.length;s++){const j=(i+s)%findings.length;if(!revs[fkey(findings[j])]?.status)return j;}
     return -1;
   }
 
   function commit(status){
-    const ents=entries.map((e,i)=>i===index?{note:draft,status,ts:new Date().toISOString()}:e);
-    setEntries(ents);setSessionCount(c=>c+1);setPopKey(k=>k+1);
-    const next=advanceFrom(index,ents);
-    if(next===-1){setPhase("done");saveSession({fileName,headers,rows,entries:ents,index,phase:"done"});}
-    else{setIndex(next);saveSession({fileName,headers,rows,entries:ents,index:next,phase:"review"});}
-    showToast(status===RQ_STATUS.SKIP?"Skipped →":"Saved ✓");
+    const f=findings[index];if(!f)return;
+    const k=fkey(f);
+    const updated={...reviews,[k]:{note:draft,status,ts:new Date().toISOString()}};
+    saveR(updated);setSessionCount(c=>c+1);setPopKey(p=>p+1);
+    const next=advanceFrom(index,updated);
+    if(next!==-1)setIndex(next);
+    showToast(status===RQ_STATUS.SKIP?"Skipped →":"Saved \u2713");
   }
 
   function jump(delta){
-    const ents=entries.map((e,i)=>i===index?{...e,note:draft}:e);
-    setEntries(ents);
-    const j=Math.min(Math.max(index+delta,0),total-1);
-    setIndex(j);
-    saveSession({fileName,headers,rows,entries:ents,index:j,phase:"review"});
+    const f=findings[index];
+    if(f){const k=fkey(f);saveR({...reviews,[k]:{...reviews[k],note:draft}});}
+    setIndex(j=>Math.min(Math.max(j+delta,0),total-1));
+    setPopKey(p=>p+1);
   }
 
+  function clearReviews(){saveR({});setIndex(0);setSessionCount(0);showToast("Reviews cleared");}
+
   function exportXlsx(){
-    const outHeaders=[...headers,"Author Note","Status","Reviewed At"];
-    const aoa=[outHeaders,...rows.map((r,i)=>[...r,entries[i].note,entries[i].status,entries[i].ts])];
-    const ws=XLSX.utils.aoa_to_sheet(aoa);
-    const wb=XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb,ws,"Review");
-    const out=XLSX.write(wb,{type:"array",bookType:"xlsx"});
-    const blob=new Blob([out],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement("a");
-    a.href=url;a.download=`${(fileName.replace(/\.(xlsx|xls|csv)$/i,"")||"review")}-reviewed.xlsx`;
-    document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
+    const rows=[["Line #","Sentence ID","Paragraph ID","Chapter ID","Flagged Sentence","Issue Type","Signal Type","Disposition","Confidence","Reason","Author Note","Status","Reviewed At"],...findings.map(f=>{const k=fkey(f);const rev=reviews[k]||{};const pid=f.paragraphId||(f.sentenceId?f.sentenceId.split(":").slice(0,2).join(":"):"");return[f.lineNum||"",f.sentenceId||"",pid,f.chapter,f.sentence,f.issue,f.signalType||"",f.disposition||"",f.confidence||"",f.reason||"",rev.note||"",rev.status||"",rev.ts||""];})];
+    const ws=XLSX.utils.aoa_to_sheet(rows);ws["!cols"]=[8,28,22,18,60,18,12,12,10,40,40,14,20].map(w=>({wch:w}));
+    const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Review");
+    XLSX.writeFile(wb,`${draftName||"afl"}_reviewed.xlsx`);
     showToast("Export ready");
   }
 
-  function clearSession(){
-    try{localStorage.removeItem(RQ_KEY);}catch(e){}
-    setRows([]);setEntries([]);setHeaders([]);setFileName("");setIndex(0);setSessionCount(0);setPhase("empty");
-  }
+  const sChip=st=>{const m={[RQ_STATUS.FIX]:{bg:"#1A3A24",c:C.pass},[RQ_STATUS.SKIP]:{bg:C.smokeLight,c:C.textMuted},[RQ_STATUS.DESKTOP]:{bg:"#2A2010",c:C.amber}}[st]||{bg:C.smokeLight,c:C.textMuted};return <span style={{background:m.bg,color:m.c,fontSize:"9px",letterSpacing:"0.15em",padding:"2px 8px",fontFamily:"Barlow Condensed, sans-serif",fontWeight:700}}>{st.toUpperCase()}</span>;};
 
-  const row=rows[index]||[];
-  const primaryIdx=0;
-  const auxFields=headers.map((h,i)=>({h,v:row[i],i})).filter(f=>f.i!==primaryIdx&&String(f.v??"").trim()!=="");
-  const currentStatus=entries[index]?.status;
+  if(total===0) return(
+    <div style={{textAlign:"center",padding:"60px 32px",color:C.textMuted}}>
+      <div style={{fontSize:"32px",marginBottom:"16px",opacity:0.2}}>&#9678;</div>
+      <div style={{fontSize:"14px",letterSpacing:"0.2em",marginBottom:"8px"}}>NO FINDINGS IN QUEUE</div>
+      <div style={{fontSize:"11px",fontFamily:"IM Fell English, serif",fontStyle:"italic",lineHeight:1.6}}>Set filters in the Findings tab first, then switch here to review.</div>
+    </div>
+  );
 
-  // ── Styled button helper ──────────────────────────────────────────────────
-  const rqBtn=(label,onClick,variant="default",disabled=false)=>{
-    const styles={
-      default:{background:"transparent",border:`1px solid ${C.smokeLight}`,color:C.textDim},
-      primary:{background:C.amber,border:"none",color:C.charcoal,fontWeight:700},
-      fix:{background:"#1A3A24",border:`1px solid ${C.pass}`,color:C.pass},
-      skip:{background:C.smokeDark,border:`1px solid ${C.smokeLight}`,color:C.textMuted},
-      desktop:{background:"#2A2010",border:`1px solid ${C.amber}`,color:C.amber},
-      quiet:{background:"transparent",border:"none",color:C.textMuted},
-      danger:{background:"transparent",border:`1px solid #5A3A2A`,color:"#C07040"},
-    };
-    const s=styles[variant]||styles.default;
-    return(
-      <button onClick={onClick} disabled={disabled} style={{...s,padding:"11px 18px",fontSize:"13px",letterSpacing:"0.06em",cursor:disabled?"default":"pointer",fontFamily:"Barlow Condensed, sans-serif",borderRadius:"2px",opacity:disabled?0.35:1,width:"100%"}}>
-        {label}
-      </button>
-    );
-  };
-
-  const statusChip=(st)=>{
-    const map={[RQ_STATUS.FIX]:{bg:"#1A3A24",color:C.pass},[RQ_STATUS.SKIP]:{bg:C.smokeLight,color:C.textMuted},[RQ_STATUS.DESKTOP]:{bg:"#2A2010",color:C.amber}};
-    const m=map[st]||{bg:C.smokeLight,color:C.textMuted};
-    return <span style={{background:m.bg,color:m.color,fontSize:"9px",letterSpacing:"0.15em",padding:"2px 8px",fontFamily:"Barlow Condensed, sans-serif",fontWeight:700}}>{st.toUpperCase()}</span>;
-  };
+  const f=findings[index];
+  const k=f?fkey(f):null;
+  const cs=k?reviews[k]?.status:null;
+  const allDone=reviewedCount===total;
 
   return(
-    <div style={{maxWidth:"640px",margin:"0 auto",padding:"0 0 80px"}}>
+    <div style={{maxWidth:"680px"}}>
+      <div style={{marginBottom:"20px"}}>
+        <div style={{height:"3px",background:C.smokeLight,marginBottom:"8px"}}>
+          <div style={{height:"100%",width:pct+"%",background:"linear-gradient(90deg,"+C.amber+","+C.redOrange+")",transition:"width 300ms ease"}}/>
+        </div>
+        <div style={{display:"flex",gap:"24px",fontSize:"11px",color:C.textMuted,fontFamily:"Barlow Condensed, sans-serif",letterSpacing:"0.08em",flexWrap:"wrap"}}>
+          <span><span style={{color:C.parchment,fontWeight:700}}>{reviewedCount}</span> / {total} reviewed &middot; {pct}%</span>
+          <span><span style={{color:C.parchment,fontWeight:700}}>{sessionCount}</span> this session</span>
+          <span>{draftName}</span>
+        </div>
+      </div>
 
-      {/* Progress bar */}
-      {(phase==="review"||phase==="done")&&(
-        <div style={{marginBottom:"20px"}}>
-          <div style={{height:"3px",background:C.smokeLight,marginBottom:"8px"}}>
-            <div style={{height:"100%",width:`${pct}%`,background:`linear-gradient(90deg,${C.amber},${C.redOrange})`,transition:"width 320ms ease"}}/>
+      {allDone&&(
+        <div style={{background:"#1A3A24",border:"1px solid "+C.pass,padding:"16px 20px",marginBottom:"16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:"12px",fontWeight:700,color:C.pass,letterSpacing:"0.15em",fontFamily:"Barlow Condensed, sans-serif"}}>ALL {total} REVIEWED</div>
+            <div style={{fontSize:"11px",color:C.textMuted,marginTop:"2px",fontFamily:"Barlow Condensed, sans-serif"}}>{findings.filter(f=>reviews[fkey(f)]?.status===RQ_STATUS.DESKTOP).length} needs desktop &middot; {findings.filter(f=>reviews[fkey(f)]?.status===RQ_STATUS.SKIP).length} skipped</div>
           </div>
-          <div style={{display:"flex",gap:"20px",fontSize:"11px",color:C.textMuted,fontFamily:"Barlow Condensed, sans-serif",letterSpacing:"0.08em"}}>
-            <span><span style={{color:C.parchment,fontWeight:700}}>{reviewedCount}</span> / {total} reviewed · {pct}%</span>
-            <span><span style={{color:C.parchment,fontWeight:700}}>{sessionCount}</span> this session</span>
-            {fileName&&<span style={{color:C.textMuted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{fileName}</span>}
-          </div>
+          <button onClick={exportXlsx} style={{background:"transparent",border:"1px solid "+C.amber,color:C.amber,padding:"9px 18px",fontSize:"11px",letterSpacing:"0.12em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif"}}>EXPORT .XLSX</button>
         </div>
       )}
 
-      {/* Empty state */}
-      {phase==="loading"&&<div style={{color:C.textMuted,padding:"40px 0",fontSize:"13px"}}>Loading…</div>}
-
-      {phase==="empty"&&(
-        <div style={{border:`1px dashed ${C.smokeLight}`,padding:"48px 32px",textAlign:"center",marginTop:"8px"}}>
-          <div style={{fontSize:"14px",letterSpacing:"0.15em",color:C.textDim,marginBottom:"8px"}}>LOAD FINDINGS FOR REVIEW</div>
-          <div style={{fontSize:"11px",color:C.textMuted,fontFamily:"IM Fell English, serif",fontStyle:"italic",marginBottom:"24px",lineHeight:1.6}}>
-            Upload any findings .xlsx — column A is the target sentence.<br/>Extra columns (chapter, issue type, reason) show on each card.<br/>Existing Author Note and Status columns resume where you left off.
-          </div>
-          <button onClick={()=>fileRef.current?.click()} style={{background:C.amber,border:"none",color:C.charcoal,padding:"10px 28px",fontSize:"12px",letterSpacing:"0.15em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",fontWeight:700}}>
-            CHOOSE FILE
-          </button>
-          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={e=>handleFile(e.target.files?.[0])}/>
-        </div>
-      )}
-
-      {/* Review card */}
-      {phase==="review"&&(
-        <>
-          <div key={popKey} style={{background:C.smokeDark,border:`1px solid ${C.smokeLight}`,padding:"20px",marginBottom:"12px",animation:"rqpop 280ms cubic-bezier(.2,.9,.3,1.2)"}}>
-            {/* Folio */}
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"16px"}}>
-              <div style={{fontSize:"10px",letterSpacing:"0.2em",color:C.textMuted,fontFamily:"Barlow Condensed, sans-serif"}}>
-                {headers[primaryIdx]?.toUpperCase()||"SENTENCE"} · {index+1} / {total}
-              </div>
-              {currentStatus&&statusChip(currentStatus)}
+      {f&&(
+        <div key={popKey} style={{background:C.smokeDark,border:"1px solid "+(cs===RQ_STATUS.FIX?C.pass:cs===RQ_STATUS.DESKTOP?C.amber:C.smokeLight),padding:"20px",marginBottom:"12px",borderLeft:"3px solid "+(cs===RQ_STATUS.FIX?C.pass:cs===RQ_STATUS.DESKTOP?C.amber:C.smokeLight)}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"14px",gap:"10px"}}>
+            <div style={{display:"flex",gap:"8px",alignItems:"center",flexWrap:"wrap"}}>
+              <div style={{background:C.smokeLight,color:C.amber,fontSize:"9px",letterSpacing:"0.1em",padding:"2px 6px",fontFamily:"Barlow Condensed, sans-serif"}}>{f.issue}</div>
+              {f.lineNum&&<div style={{fontSize:"10px",color:C.textMuted,fontFamily:"Barlow Condensed, sans-serif"}}>L{f.lineNum.toLocaleString()}</div>}
+              <div style={{fontSize:"10px",color:C.textMuted,fontFamily:"Barlow Condensed, sans-serif"}}>{(f.chapter||"").slice(0,24)}</div>
             </div>
-
-            {/* Primary — the flagged sentence */}
-            <div style={{borderLeft:`2px solid ${C.amber}`,paddingLeft:"14px",marginBottom:"16px"}}>
-              <div style={{fontSize:"15px",color:C.parchment,fontFamily:"IM Fell English, serif",lineHeight:1.7}}>{String(row[primaryIdx]??"")}</div>
-            </div>
-
-            {/* Aux fields */}
-            {auxFields.map(f=>(
-              <div key={f.i} style={{marginBottom:"12px"}}>
-                <div style={{fontSize:"9px",letterSpacing:"0.18em",color:C.textMuted,fontFamily:"Barlow Condensed, sans-serif",marginBottom:"3px"}}>{String(f.h).toUpperCase()}</div>
-                <div style={{fontSize:"12px",color:C.textDim,fontFamily:"Barlow Condensed, sans-serif",lineHeight:1.5}}>{String(f.v)}</div>
-              </div>
-            ))}
-
-            {/* Author note */}
-            <div style={{fontSize:"9px",letterSpacing:"0.18em",color:C.textMuted,fontFamily:"Barlow Condensed, sans-serif",marginBottom:"6px",marginTop:"16px"}}>AUTHOR NOTE</div>
-            <textarea
-              value={draft}
-              onChange={e=>setDraft(e.target.value)}
-              onKeyDown={e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")commit(RQ_STATUS.FIX);}}
-              placeholder="Decision, rewrite, or note for the desktop pass…"
-              rows={4}
-              style={{width:"100%",background:C.charcoal,border:`1px solid ${C.smokeLight}`,color:C.parchment,padding:"10px 12px",fontSize:"14px",fontFamily:"IM Fell English, serif",lineHeight:1.6,resize:"vertical",outline:"none",boxSizing:"border-box"}}
-            />
-            <div style={{fontSize:"10px",color:C.textMuted,marginTop:"4px",fontFamily:"Barlow Condensed, sans-serif"}}>⌘↵ to save &amp; next</div>
-          </div>
-
-          {/* Action buttons */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr",gap:"8px",marginBottom:"12px"}}>
-            {rqBtn("SAVE NOTE & NEXT →",()=>commit(RQ_STATUS.FIX),"fix")}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px"}}>
-              {rqBtn("SKIP",()=>commit(RQ_STATUS.SKIP),"skip")}
-              {rqBtn("NEEDS DESKTOP",()=>commit(RQ_STATUS.DESKTOP),"desktop")}
+            <div style={{display:"flex",alignItems:"center",gap:"10px",flexShrink:0}}>
+              {cs&&sChip(cs)}
+              <div style={{fontSize:"10px",color:C.textMuted,fontFamily:"Barlow Condensed, sans-serif"}}>{index+1} / {total}</div>
             </div>
           </div>
-
-          {/* Nav */}
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"16px"}}>
-            <button onClick={()=>jump(-1)} disabled={index===0} style={{background:"none",border:"none",color:index===0?C.smokeLight:C.textMuted,cursor:index===0?"default":"pointer",fontSize:"12px",fontFamily:"Barlow Condensed, sans-serif",letterSpacing:"0.1em",padding:"4px 0"}}>← BACK</button>
-            <button onClick={exportXlsx} style={{background:"none",border:"none",color:C.amber,cursor:"pointer",fontSize:"12px",fontFamily:"Barlow Condensed, sans-serif",letterSpacing:"0.1em"}}>EXPORT .XLSX</button>
-            <button onClick={()=>jump(1)} disabled={index===total-1} style={{background:"none",border:"none",color:index===total-1?C.smokeLight:C.textMuted,cursor:index===total-1?"default":"pointer",fontSize:"12px",fontFamily:"Barlow Condensed, sans-serif",letterSpacing:"0.1em",padding:"4px 0"}}>FORWARD →</button>
+          <div style={{borderLeft:"2px solid "+C.amber,paddingLeft:"14px",marginBottom:"14px"}}>
+            <div style={{fontSize:"15px",color:C.parchment,fontFamily:"IM Fell English, serif",lineHeight:1.7}}>{f.sentence}</div>
           </div>
-          <div style={{textAlign:"center"}}>
-            <button onClick={clearSession} style={{background:"none",border:"none",color:C.textMuted,cursor:"pointer",fontSize:"11px",fontFamily:"Barlow Condensed, sans-serif",letterSpacing:"0.08em"}}>clear session</button>
-          </div>
-        </>
+          {f.reason&&<div style={{fontSize:"10px",color:C.textMuted,letterSpacing:"0.06em",fontFamily:"Barlow Condensed, sans-serif",marginBottom:"14px"}}>{"\u2193"} {f.reason}</div>}
+          {f.sentenceId&&<div style={{fontSize:"9px",color:C.smokeLight,letterSpacing:"0.08em",fontFamily:"Barlow Condensed, sans-serif",marginBottom:"14px",borderTop:"1px solid "+C.smokeLight,paddingTop:"10px"}}>{f.sentenceId}</div>}
+          <div style={{fontSize:"9px",letterSpacing:"0.18em",color:C.textMuted,fontFamily:"Barlow Condensed, sans-serif",marginBottom:"6px"}}>AUTHOR NOTE</div>
+          <textarea value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")commit(RQ_STATUS.FIX);}} placeholder="Revision or note for the desktop pass..." rows={4} style={{width:"100%",background:C.charcoal,border:"1px solid "+C.smokeLight,color:C.parchment,padding:"10px 12px",fontSize:"14px",fontFamily:"IM Fell English, serif",lineHeight:1.6,resize:"vertical",outline:"none",boxSizing:"border-box"}}/>
+          <div style={{fontSize:"9px",color:C.textMuted,marginTop:"4px",fontFamily:"Barlow Condensed, sans-serif"}}>Cmd+Enter to save &amp; next</div>
+        </div>
       )}
 
-      {/* Done state */}
-      {phase==="done"&&(
-        <div style={{textAlign:"center",padding:"48px 16px"}}>
-          <div style={{width:"80px",height:"80px",margin:"0 auto 20px",border:`2px solid ${C.amber}`,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",transform:"rotate(-8deg)"}}>
-            <span style={{fontSize:"11px",fontWeight:700,letterSpacing:"0.15em",color:C.amber,fontFamily:"Barlow Condensed, sans-serif"}}>REVIEWED</span>
-          </div>
-          <div style={{fontSize:"24px",fontWeight:700,fontFamily:"Barlow Condensed, sans-serif",color:C.parchment,marginBottom:"8px"}}>{total} ROWS REVIEWED</div>
-          <div style={{fontSize:"12px",color:C.textMuted,marginBottom:"28px",fontFamily:"Barlow Condensed, sans-serif",letterSpacing:"0.06em"}}>
-            {entries.filter(e=>e.status===RQ_STATUS.DESKTOP).length} NEEDS DESKTOP · {entries.filter(e=>e.status===RQ_STATUS.SKIP).length} SKIPPED
-          </div>
-          <div style={{display:"flex",gap:"10px",justifyContent:"center",flexWrap:"wrap"}}>
-            <button onClick={exportXlsx} style={{background:C.amber,border:"none",color:C.charcoal,padding:"10px 24px",fontSize:"12px",letterSpacing:"0.15em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",fontWeight:700}}>EXPORT .XLSX</button>
-            <button onClick={()=>setPhase("review")} style={{background:"transparent",border:`1px solid ${C.smokeLight}`,color:C.textDim,padding:"10px 20px",fontSize:"12px",letterSpacing:"0.15em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif"}}>KEEP EDITING</button>
-          </div>
-          <div style={{marginTop:"16px"}}>
-            <button onClick={clearSession} style={{background:"none",border:"none",color:C.textMuted,cursor:"pointer",fontSize:"11px",fontFamily:"Barlow Condensed, sans-serif"}}>start new sheet</button>
+      {f&&(
+        <div style={{display:"grid",gap:"8px",marginBottom:"14px"}}>
+          <button onClick={()=>commit(RQ_STATUS.FIX)} style={{background:"#1A3A24",border:"1px solid "+C.pass,color:C.pass,padding:"11px 18px",fontSize:"12px",letterSpacing:"0.12em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",fontWeight:700,width:"100%"}}>SAVE NOTE &amp; NEXT</button>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px"}}>
+            <button onClick={()=>commit(RQ_STATUS.SKIP)} style={{background:C.smokeDark,border:"1px solid "+C.smokeLight,color:C.textMuted,padding:"11px 18px",fontSize:"12px",letterSpacing:"0.12em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",width:"100%"}}>SKIP</button>
+            <button onClick={()=>commit(RQ_STATUS.DESKTOP)} style={{background:"#2A2010",border:"1px solid "+C.amber,color:C.amber,padding:"11px 18px",fontSize:"12px",letterSpacing:"0.12em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",width:"100%"}}>NEEDS DESKTOP</button>
           </div>
         </div>
       )}
 
-      {/* Toast */}
-      {toast&&(
-        <div style={{position:"fixed",bottom:"24px",left:"50%",transform:"translateX(-50%)",background:C.parchment,color:C.charcoal,fontSize:"12px",fontWeight:700,letterSpacing:"0.1em",padding:"9px 20px",boxShadow:"0 4px 16px rgba(0,0,0,0.4)",fontFamily:"Barlow Condensed, sans-serif",zIndex:100}}>
-          {toast}
-        </div>
-      )}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px"}}>
+        <button onClick={()=>jump(-1)} disabled={index===0} style={{background:"none",border:"none",color:index===0?C.smokeLight:C.textMuted,cursor:index===0?"default":"pointer",fontSize:"12px",fontFamily:"Barlow Condensed, sans-serif",letterSpacing:"0.1em"}}>&#8592; BACK</button>
+        <button onClick={exportXlsx} style={{background:"none",border:"none",color:C.amber,cursor:"pointer",fontSize:"12px",fontFamily:"Barlow Condensed, sans-serif",letterSpacing:"0.1em"}}>EXPORT .XLSX</button>
+        <button onClick={()=>jump(1)} disabled={index===total-1} style={{background:"none",border:"none",color:index===total-1?C.smokeLight:C.textMuted,cursor:index===total-1?"default":"pointer",fontSize:"12px",fontFamily:"Barlow Condensed, sans-serif",letterSpacing:"0.1em"}}>FORWARD &#8594;</button>
+      </div>
+      <div style={{textAlign:"center"}}>
+        <button onClick={clearReviews} style={{background:"none",border:"none",color:C.textMuted,cursor:"pointer",fontSize:"10px",fontFamily:"Barlow Condensed, sans-serif"}}>clear all reviews</button>
+      </div>
 
-      <style>{`@keyframes rqpop{0%{transform:scale(0.97);opacity:0.5}100%{transform:scale(1);opacity:1}}`}</style>
+      {toast&&<div style={{position:"fixed",bottom:"24px",left:"50%",transform:"translateX(-50%)",background:C.parchment,color:C.charcoal,fontSize:"12px",fontWeight:700,letterSpacing:"0.1em",padding:"9px 20px",boxShadow:"0 4px 16px rgba(0,0,0,0.4)",fontFamily:"Barlow Condensed, sans-serif",zIndex:100}}>{toast}</div>}
     </div>
   );
 }
@@ -495,10 +352,10 @@ export default function App(){
           {ff.length===0&&<div style={{textAlign:"center",padding:"40px",color:C.textMuted,fontSize:"12px",letterSpacing:"0.1em"}}>NO FINDINGS MATCH</div>}
         </div>
       </div>)}
-      {activeTab==="review"&&<div style={{padding:"0 32px 28px",maxWidth:"1160px",margin:"0 auto"}}><ReviewQueue/></div>}
+      {activeTab==="review"&&<div style={{padding:"0 32px 28px",maxWidth:"1160px",margin:"0 auto"}}><ReviewQueue findings={ff} draftName={activeSession?.draftName||""}/></div>}
     </div>
     {sessions.length>=2&&activeSession&&(<div style={{borderTop:`1px solid ${C.smokeLight}`,padding:"14px 32px",display:"flex",gap:"32px",alignItems:"center"}}><div style={{fontSize:"10px",letterSpacing:"0.15em",color:C.textMuted,flexShrink:0}}>HEALTH TIMELINE</div>{sessions.map(s=>(<div key={s.id} onClick={()=>setActiveSession(s)} style={{cursor:"pointer",textAlign:"center",opacity:s.id===activeSession.id?1:0.45}}><div style={{fontSize:"20px",fontWeight:700,color:C.amber,fontFamily:"Barlow Condensed, sans-serif"}}>{s.health}</div><div style={{fontSize:"9px",color:C.textMuted,letterSpacing:"0.08em"}}>{s.draftName}</div></div>))}</div>)}
     {showPanel&&<SignalPanel builtinSignals={BUILTIN_SIGNALS} customSignals={customSignals} onToggleCustom={toggleCustom} onDeleteCustom={deleteCustom} onRename={renameCustom} onAddSignal={()=>{setShowAddModal(true);setShowPanel(false);}} onImport={importFindings} onClose={()=>setShowPanel(false)}/>}
     {showAddModal&&<AddSignalModal sentenceIndex={sentenceIndex} onSave={addCustomSignal} onClose={()=>setShowAddModal(false)}/>}
-    <style>{`@keyframes pulse{0%,100%{opacity:.3;transform:translateX(-100%)}50%{opacity:1;transform:translateX(250%)}}input::placeholder{color:#8A8070;}select option{background:#2A2A2A;}::-webkit-scrollbar{width:6px;}::-webkit-scrollbar-track{background:#1C1C1C;}::-webkit-scrollbar-thumb{background:#3A3938;}`}</style>
+    <style>{`@keyframes pulse{0%,100%{opacity:.3;transform:translateX(-100%)}50%{opacity:1;transform:translateX(250%)}}@keyframes rqpop{0%{transform:scale(0.97);opacity:0.5}100%{transform:scale(1);opacity:1}}input::placeholder{color:#8A8070;}select option{background:#2A2A2A;}::-webkit-scrollbar{width:6px;}::-webkit-scrollbar-track{background:#1C1C1C;}::-webkit-scrollbar-thumb{background:#3A3938;}`}</style>
   </div>);}
