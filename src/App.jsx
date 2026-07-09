@@ -43,11 +43,13 @@ if(cls==="NARRATION"||cls==="DIALOGUE_ACTION"){const tgt=cls==="DIALOGUE_ACTION"
 if(cls==="NARRATION"&&wordCount>=8){const g=detectGPS(text,wordCount);if(g&&g.confidence>=60)findings.push({signal_id:"gps_lite",signalType:"defect",chapter,sentenceId,paragraphId,hash,lineNum,sentence:text,issue:`GPS: ${g.type.replace(/_/g," ")}`,disposition:g.confidence>=75?D.ACTIONABLE:D.REVIEW,confidence:g.confidence,reason:g.reason});}
 for(const cs of customSignals){if(!cs.enabled||cs.imported)continue;const el=cs.scope==="narration"?["NARRATION"]:cs.scope==="dialogue"?["PURE_DIALOGUE","DIALOGUE_TAG","DIALOGUE_ACTION"]:["NARRATION","PURE_DIALOGUE","DIALOGUE_TAG","DIALOGUE_ACTION"];if(!el.includes(cls))continue;let m=false;for(const kw of cs.keywords){const k=kw.trim();if(!k)continue;try{const pt=new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")}\\b`,"gi");if(pt.test(text)){m=true;break;}}catch{}}if(m)findings.push({signal_id:cs.id,signalType:cs.signalType||"defect",chapter,sentenceId,paragraphId,hash,lineNum,sentence:text,issue:cs.name.toUpperCase(),disposition:D.REVIEW,confidence:75,reason:`Custom: ${cs.keywords.slice(0,3).join(", ")}`});}}return findings;}
 const BUILTIN_SIGNALS=[{id:"seven_word",name:"7-Word Narration Rule",short:"7-WORD",signalType:"defect",description:"Narration sentences under 7 words",builtin:true},{id:"interiority",name:"Interiority Leak",short:"INTERIORITY",signalType:"defect",description:"Stated thoughts, feelings, cognition",builtin:true},{id:"pronoun_ambiguity",name:"Pronoun Ambiguity",short:"PRONOUN",signalType:"defect",description:'Vague "it," "this," "that" in narration',builtin:true},{id:"repeated_openers",name:"Repeated Openers",short:"OPENERS",signalType:"defect",description:"3+ consecutive same-word openers",builtin:true},{id:"flat_wave",name:"Flat Sentence Wave",short:"FLAT WAVE",signalType:"defect",description:"Monotonous sentence-length paragraphs",builtin:true},{id:"filter_verb",name:"Filter Verb / Perception Leak",short:"FILTER VERB",signalType:"defect",description:'"saw," "looked," "noticed" in narration',builtin:true},{id:"gps_lite",name:"GPS-Lite: Garden-Path Scanner",short:"GPS-LITE",signalType:"defect",description:"Heuristic first-parse friction",builtin:true}];
-const SK="afl_cockpit_v5",CSK="afl_cockpit_custom_signals";
+const SK="afl_cockpit_v5",CSK="afl_cockpit_custom_signals",DSK="afl_cockpit_dismissals";
 function loadSessions(){try{return JSON.parse(localStorage.getItem(SK)||"[]");}catch{return[];}}
 function saveSessions(s){try{localStorage.setItem(SK,JSON.stringify(s.map(x=>({...x,findings:x.findings?.slice(0,2000)}))));}catch{}}
 function loadCustomSignals(){try{return JSON.parse(localStorage.getItem(CSK)||"[]");}catch{return[];}}
 function saveCustomSignals(s){try{localStorage.setItem(CSK,JSON.stringify(s));}catch{}}
+function loadDismissals(){try{return new Set(JSON.parse(localStorage.getItem(DSK)||"[]"));}catch{return new Set();}}
+function saveDismissals(s){try{localStorage.setItem(DSK,JSON.stringify([...s]));}catch{}}
 function computeHealth(findings,wc){if(!wc)return 0;const a=findings.filter(f=>f.disposition===D.ACTIONABLE).length;return Math.round(Math.max(40,Math.min(100,100-(a/wc)*1000*0.55))*10)/10;}
 function exportToXlsx(findings,name){const rows=[["Line #","Sentence ID","Paragraph ID","Chapter ID","Flagged Sentence","Issue Type","Signal Type","Disposition","Confidence","Reason"]];for(const f of findings){const pid=f.paragraphId||(f.sentenceId?f.sentenceId.split(':').slice(0,2).join(':'):"");rows.push([f.lineNum||"",f.sentenceId||"",pid,f.chapter,f.sentence,f.issue,f.signalType||"defect",f.disposition||"",f.confidence||"",f.reason||""]);}const ws=XLSX.utils.aoa_to_sheet(rows);ws["!cols"]=[8,28,22,18,60,18,12,12,10,40].map(w=>({wch:w}));const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Findings");XLSX.writeFile(wb,`${name}_findings.xlsx`);}
 function normSentence(s){return(s||"").toLowerCase().replace(/[^a-z0-9\s]/g,"").replace(/\s+/g," ").trim();}
@@ -141,7 +143,7 @@ function HealthBar({score,prevScore}){const d=prevScore!==undefined?(score-prevS
 const RQ_KEY="afl_review_queue_v1";
 const RQ_STATUS={FIX:"Fix",SKIP:"Skip",DESKTOP:"Needs Desktop"};
 
-function ReviewQueue({findings,draftName}){
+function ReviewQueue({findings,draftName,onDismiss}){
   const[reviews,setReviews]=useState(()=>{try{return JSON.parse(localStorage.getItem(RQ_KEY)||"{}");}catch{return{};}});
   const[index,setIndex]=useState(0);
   const[draft,setDraft]=useState("");
@@ -265,9 +267,10 @@ function ReviewQueue({findings,draftName}){
       {f&&(
         <div style={{display:"grid",gap:"8px",marginBottom:"14px"}}>
           <button onClick={()=>commit(RQ_STATUS.FIX)} style={{background:"#1A3A24",border:"1px solid "+C.pass,color:C.pass,padding:"11px 18px",fontSize:"12px",letterSpacing:"0.12em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",fontWeight:700,width:"100%"}}>SAVE NOTE &amp; NEXT</button>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px"}}>
-            <button onClick={()=>commit(RQ_STATUS.SKIP)} style={{background:C.smokeDark,border:"1px solid "+C.smokeLight,color:C.textMuted,padding:"11px 18px",fontSize:"12px",letterSpacing:"0.12em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",width:"100%"}}>SKIP</button>
-            <button onClick={()=>commit(RQ_STATUS.DESKTOP)} style={{background:"#2A2010",border:"1px solid "+C.amber,color:C.amber,padding:"11px 18px",fontSize:"12px",letterSpacing:"0.12em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",width:"100%"}}>NEEDS DESKTOP</button>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"8px"}}>
+            <button onClick={()=>commit(RQ_STATUS.SKIP)} style={{background:C.smokeDark,border:"1px solid "+C.smokeLight,color:C.textMuted,padding:"11px 14px",fontSize:"11px",letterSpacing:"0.12em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",width:"100%"}}>SKIP</button>
+            <button onClick={()=>commit(RQ_STATUS.DESKTOP)} style={{background:"#2A2010",border:"1px solid "+C.amber,color:C.amber,padding:"11px 14px",fontSize:"11px",letterSpacing:"0.12em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",width:"100%"}}>NEEDS DESKTOP</button>
+            <button onClick={()=>{if(!f||!onDismiss)return;onDismiss(f);setPopKey(p=>p+1);setSessionCount(c=>c+1);const next=advanceFrom(index,reviews);if(next!==-1)setIndex(next);showToast("Author skipped — removed from count");}} style={{background:"#1A1A2A",border:"1px solid #5A5A8A",color:"#8A8ACA",padding:"11px 14px",fontSize:"11px",letterSpacing:"0.12em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif",width:"100%"}}>AUTHOR SKIP</button>
           </div>
         </div>
       )}
@@ -288,6 +291,7 @@ function ReviewQueue({findings,draftName}){
 
 export default function App(){
   const[sessions,setSessions]=useState([]);const[activeSession,setActiveSession]=useState(null);const[sentenceIndex,setSentenceIndex]=useState(null);const[customSignals,setCustomSignals]=useState([]);const[uploading,setUploading]=useState(false);const[uploadStep,setUploadStep]=useState("");const[uploadTime,setUploadTime]=useState(null);const[activeTab,setActiveTab]=useState("dashboard");const[filterSignal,setFilterSignal]=useState("all");const[filterDisp,setFilterDisp]=useState("actionable");const[search,setSearch]=useState("");const[sortBy,setSortBy]=useState("line");const[showPanel,setShowPanel]=useState(false);const[showAddModal,setShowAddModal]=useState(false);
+  const[dismissals,setDismissals]=useState(()=>loadDismissals());
   const fileInputRef=useRef();const sirRef=useRef(null);
   useEffect(()=>{const s=loadSessions();if(s.length){setSessions(s);setActiveSession(s[s.length-1]);}setCustomSignals(loadCustomSignals());},[]);
   useEffect(()=>{sirRef.current=sentenceIndex;},[sentenceIndex]);
@@ -301,8 +305,22 @@ export default function App(){
   const deleteCustom=useCallback(id=>{const u=customSignals.filter(s=>s.id!==id);setCustomSignals(u);saveCustomSignals(u);},[customSignals]);
   const renameCustom=useCallback((id,n)=>{if(!n.trim())return;const u=customSignals.map(s=>s.id===id?{...s,name:n.trim(),short:n.trim().toUpperCase().slice(0,10)}:s);setCustomSignals(u);saveCustomSignals(u);},[customSignals]);
   const importFindings=useCallback(async(file)=>{try{const sheets=await parseImportedXlsx(file);if(!sheets.length){alert("No valid sheets.");return;}const ef=activeSession?.findings||[];const ci=sirRef.current||[];const nm=ci.map(s=>({norm:normSentence(s.text),lineNum:s.lineNum,chapter:s.chapter,sentenceId:s.sentenceId,paragraphId:s.paragraphId,hash:s.hash}));const ns=[];for(const{signalName,sentences}of sheets){const dd=deduplicateImported(sentences,ef);const id="imported_"+Date.now()+"_"+Math.random().toString(36).slice(2,6);const fi=dd.map(({sentence,isDupe})=>{const norm=normSentence(sentence);let ln=null,mc=null,mid=null,mh=null,mp=null,bs=0;for(const e of nm){const sc=overlapRatio(norm,e.norm);if(sc>bs&&sc>=0.6){bs=sc;ln=e.lineNum;mc=e.chapter;mid=e.sentenceId;mh=e.hash;mp=e.paragraphId;}}return{signal_id:id,signalType:"reader_note",chapter:mc||"UNMATCHED",sentenceId:mid,paragraphId:mp,hash:mh,lineNum:ln,sentence,issue:signalName.toUpperCase(),disposition:isDupe?"excluded":"review_only",confidence:Math.round(bs*100)||80,reason:isDupe?"Duplicate":`Imported · ${ln?`L${ln}`:"no match"}`};});ns.push({id,name:signalName,short:signalName.toUpperCase().slice(0,10),description:`Imported ${fi.filter(f=>f.disposition!=="excluded").length} unique`,keywords:[],scope:"all",enabled:true,builtin:false,imported:true,importedFindings:fi});}const u=[...customSignals,...ns];setCustomSignals(u);saveCustomSignals(u);if(activeSession){const af=ns.flatMap(s=>s.importedFindings);const us={...activeSession,findings:[...ef,...af],counts:{...activeSession.counts},rawCounts:{...activeSession.rawCounts}};for(const sig of ns){us.counts[sig.id]=sig.importedFindings.filter(f=>f.disposition!=="excluded").length;us.rawCounts[sig.id]=sig.importedFindings.length;}setActiveSession(us);setSessions(prev=>{const next=prev.map(s=>s.id===us.id?us:s);saveSessions(next);return next;});}setShowPanel(false);alert(`Imported ${ns.length} signal(s).`);}catch(err){alert("Import error: "+err.message);}},[activeSession,customSignals]);
-  const ai=sessions.findIndex(s=>s.id===activeSession?.id);const ps=ai>0?sessions[ai-1]:null;const ta=activeSession?Object.values(activeSession.counts).reduce((a,b)=>a+b,0):0;const tr=activeSession?Object.values(activeSession.rawCounts||{}).reduce((a,b)=>a+b,0):0;const pt=ps?Object.values(ps.counts).reduce((a,b)=>a+b,0):null;const dc={actionable:C.amber,review_only:C.textDim};
-  const ff=(()=>{let r=(activeSession?.findings||[]).filter(f=>{if(filterSignal!=="all"&&f.signal_id!==filterSignal)return false;if(filterDisp!=="all"&&f.disposition!==filterDisp)return false;if(search&&!f.sentence.toLowerCase().includes(search.toLowerCase())&&!f.chapter.toLowerCase().includes(search.toLowerCase()))return false;return true;});if(sortBy==="line")r=[...r].sort((a,b)=>(a.lineNum||999999)-(b.lineNum||999999));if(sortBy==="chapter")r=[...r].sort((a,b)=>a.chapter.localeCompare(b.chapter)||(a.lineNum||0)-(b.lineNum||0));if(sortBy==="signal")r=[...r].sort((a,b)=>a.signal_id.localeCompare(b.signal_id)||(a.lineNum||0)-(b.lineNum||0));return r;})();
+
+  const handleDismiss=useCallback(f=>{
+    const k=f.sentenceId||f.sentence?.slice(0,80)||"x";
+    const updated=new Set([...dismissals,k]);
+    setDismissals(updated);
+    saveDismissals(updated);
+  },[dismissals]);
+  const fkey=f=>f.sentenceId||f.sentence?.slice(0,80)||"x";
+  const ai=sessions.findIndex(s=>s.id===activeSession?.id);const ps=ai>0?sessions[ai-1]:null;
+  // Exclude dismissed findings from all counts
+  const activeFindings=(activeSession?.findings||[]).filter(f=>!dismissals.has(fkey(f)));
+  const activeCounts=useMemo(()=>{const c={};for(const sig of allSignals) c[sig.id]=0;for(const f of activeFindings){if(f.disposition!==D.EXCLUDED) c[f.signal_id]=(c[f.signal_id]||0)+1;}return c;},[activeFindings,allSignals]);
+  const ta=Object.values(activeCounts).reduce((a,b)=>a+b,0);
+  const tr=activeFindings.length;
+  const pt=ps?Object.values(ps.counts).reduce((a,b)=>a+b,0):null;const dc={actionable:C.amber,review_only:C.textDim};
+  const ff=(()=>{let r=activeFindings.filter(f=>{if(filterSignal!=="all"&&f.signal_id!==filterSignal)return false;if(filterDisp!=="all"&&f.disposition!==filterDisp)return false;if(search&&!f.sentence.toLowerCase().includes(search.toLowerCase())&&!f.chapter.toLowerCase().includes(search.toLowerCase()))return false;return true;});if(sortBy==="line")r=[...r].sort((a,b)=>(a.lineNum||999999)-(b.lineNum||999999));if(sortBy==="chapter")r=[...r].sort((a,b)=>a.chapter.localeCompare(b.chapter)||(a.lineNum||0)-(b.lineNum||0));if(sortBy==="signal")r=[...r].sort((a,b)=>a.signal_id.localeCompare(b.signal_id)||(a.lineNum||0)-(b.lineNum||0));return r;})();
   return(<div style={{minHeight:"100vh",background:C.charcoal,color:C.parchment,fontFamily:"Barlow Condensed, sans-serif"}}>
     <div style={{borderBottom:`1px solid ${C.smokeLight}`,padding:"0 24px",display:"flex",alignItems:"center",justifyContent:"space-between",height:"56px"}}>
       <div style={{display:"flex",alignItems:"baseline",gap:"16px"}}><span style={{fontSize:"18px",fontWeight:700,letterSpacing:"0.15em",color:C.amber}}>AFL</span><span style={{fontSize:"14px",letterSpacing:"0.2em",color:C.textMuted}}>EDITING COCKPIT</span></div>
@@ -327,9 +345,12 @@ export default function App(){
           {ps&&ta>pt&&<div><div style={{fontSize:"10px",letterSpacing:"0.15em",color:C.regress,marginBottom:"4px"}}>⚠ REGRESSION</div><div style={{fontSize:"32px",fontWeight:700,color:C.regress}}>+{(ta-pt).toLocaleString()}</div></div>}
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(240px,1fr))",gap:"12px",marginBottom:"24px"}}>
-          {allSignals.filter(s=>s.enabled!==false).map(sig=>(<SignalCard key={sig.id} signal={sig} actionable={activeSession.counts[sig.id]||0} raw={activeSession.rawCounts?.[sig.id]||0} prevActionable={ps?.counts[sig.id]} onClick={()=>{setFilterSignal(sig.id);setFilterDisp("all");setActiveTab("findings");}}/>))}
+          {allSignals.filter(s=>s.enabled!==false).map(sig=>(<SignalCard key={sig.id} signal={sig} actionable={activeCounts[sig.id]||0} raw={activeSession?.rawCounts?.[sig.id]||0} prevActionable={ps?.counts[sig.id]} onClick={()=>{setFilterSignal(sig.id);setFilterDisp("all");setActiveTab("findings");}}/>))}
         </div>
-        <button onClick={()=>exportToXlsx(activeSession.findings||[],activeSession.draftName)} style={{background:"transparent",border:`1px solid ${C.amber}`,color:C.amber,padding:"10px 24px",fontSize:"12px",letterSpacing:"0.15em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif"}}>EXPORT ALL FINDINGS</button>
+        <div style={{display:"flex",gap:"16px",alignItems:"center",flexWrap:"wrap"}}>
+          <button onClick={()=>exportToXlsx(activeFindings,activeSession.draftName)} style={{background:"transparent",border:"1px solid "+C.amber,color:C.amber,padding:"10px 24px",fontSize:"12px",letterSpacing:"0.15em",cursor:"pointer",fontFamily:"Barlow Condensed, sans-serif"}}>EXPORT ALL FINDINGS</button>
+          {dismissals.size>0&&<div style={{fontSize:"11px",color:C.textMuted,fontFamily:"Barlow Condensed, sans-serif"}}>{dismissals.size} author-skipped &middot; <button onClick={()=>{const e=new Set();setDismissals(e);saveDismissals(e);}} style={{background:"none",border:"none",color:C.textMuted,cursor:"pointer",fontSize:"11px",fontFamily:"Barlow Condensed, sans-serif",textDecoration:"underline"}}>restore all</button></div>}
+        </div>
       </div>)}
       {activeSession&&activeTab==="findings"&&(<div>
         <div style={{display:"flex",gap:"8px",marginBottom:"20px",flexWrap:"wrap",alignItems:"center"}}>
@@ -352,7 +373,7 @@ export default function App(){
           {ff.length===0&&<div style={{textAlign:"center",padding:"40px",color:C.textMuted,fontSize:"12px",letterSpacing:"0.1em"}}>NO FINDINGS MATCH</div>}
         </div>
       </div>)}
-      {activeTab==="review"&&<div style={{padding:"0 32px 28px",maxWidth:"1160px",margin:"0 auto"}}><ReviewQueue findings={ff} draftName={activeSession?.draftName||""}/></div>}
+      {activeTab==="review"&&<div style={{padding:"0 32px 28px",maxWidth:"1160px",margin:"0 auto"}}><ReviewQueue findings={ff} draftName={activeSession?.draftName||""} onDismiss={handleDismiss}/></div>}
     </div>
     {sessions.length>=2&&activeSession&&(<div style={{borderTop:`1px solid ${C.smokeLight}`,padding:"14px 32px",display:"flex",gap:"32px",alignItems:"center"}}><div style={{fontSize:"10px",letterSpacing:"0.15em",color:C.textMuted,flexShrink:0}}>HEALTH TIMELINE</div>{sessions.map(s=>(<div key={s.id} onClick={()=>setActiveSession(s)} style={{cursor:"pointer",textAlign:"center",opacity:s.id===activeSession.id?1:0.45}}><div style={{fontSize:"20px",fontWeight:700,color:C.amber,fontFamily:"Barlow Condensed, sans-serif"}}>{s.health}</div><div style={{fontSize:"9px",color:C.textMuted,letterSpacing:"0.08em"}}>{s.draftName}</div></div>))}</div>)}
     {showPanel&&<SignalPanel builtinSignals={BUILTIN_SIGNALS} customSignals={customSignals} onToggleCustom={toggleCustom} onDeleteCustom={deleteCustom} onRename={renameCustom} onAddSignal={()=>{setShowAddModal(true);setShowPanel(false);}} onImport={importFindings} onClose={()=>setShowPanel(false)}/>}
